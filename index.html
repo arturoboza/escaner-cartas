@@ -1,0 +1,1313 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Escáner">
+<meta name="theme-color" content="#0c1014">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icono-180.png">
+<link rel="icon" type="image/png" href="icono-180.png">
+<title>Escáner de cartas</title>
+<style>
+/* Diseño: visor de cámara a pantalla completa. Estado arriba, controles abajo
+   (al costado en un teléfono horizontal) y paneles completos para fotos y ajustes. */
+:root {
+  color-scheme: dark;
+  --bg: #0c1014;
+  --panel: #151b22;
+  --panel-2: #1e2630;
+  --line: #2c3743;
+  --fg: #f1f4f6;
+  --muted: #93a1ae;
+  --marco: #ffd24a;        /* amarillo de visor: marco y acción principal */
+  --sobre-marco: #1b1500;
+  --mov: #58b4ff;          /* movimiento detectado */
+  --ok: #46d483;           /* foto guardada */
+  --mal: #ff6b63;          /* errores y borrar */
+  --sobre-mal: #230503;
+  --velo: rgba(5, 8, 11, .52);
+  --destello: #ffffff;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body {
+  height: 100%; margin: 0; overflow: hidden; overscroll-behavior: none;
+  background: var(--bg); color: var(--fg);
+  font: 15px/1.4 var(--font); -webkit-text-size-adjust: 100%;
+  touch-action: manipulation;
+}
+button, select, input { font: inherit; color: inherit; }
+button { -webkit-appearance: none; appearance: none; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+button:disabled { cursor: default; }
+:focus-visible { outline: 2px solid var(--marco); outline-offset: 2px; }
+h1, h2, h3, p { margin: 0; }
+
+/* ── estructura ── */
+.app {
+  position: fixed; top: 0; right: 0; bottom: 0; left: 0;
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr);
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+}
+.top {
+  display: flex; align-items: center; gap: 10px; min-height: 48px;
+  padding: calc(8px + env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) 8px max(16px, env(safe-area-inset-left, 0px));
+}
+.estado {
+  display: inline-flex; align-items: center; gap: 8px; min-width: 0;
+  padding: 6px 12px 6px 10px; border-radius: 999px;
+  background: var(--panel); border: 1px solid var(--line);
+  font-weight: 600; font-size: 14px;
+}
+.estado span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.punto { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+.estado[data-e="quieto"] .punto { background: var(--marco); }
+.estado[data-e="movimiento"] .punto, .estado[data-e="ajustando"] .punto { background: var(--mov); }
+.estado[data-e="captura"] .punto { background: var(--ok); }
+.chip {
+  position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 4; white-space: nowrap;
+  padding: 6px 14px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--panel); font-size: 13px; font-weight: 600; color: var(--fg);
+}
+.cuenta { margin-left: auto; flex: none; font-size: 14px; color: var(--muted); white-space: nowrap; }
+.cuenta b { color: var(--fg); font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.stage {
+  position: relative; min-width: 0; min-height: 0; overflow: hidden;
+  display: grid; place-items: center;
+  padding: 0 max(8px, env(safe-area-inset-right, 0px)) 0 max(8px, env(safe-area-inset-left, 0px));
+}
+
+/* ── pantalla de inicio ── */
+.intro {
+  display: grid; gap: 18px; align-content: center;
+  width: 100%; max-width: 30rem; max-height: 100%; overflow: auto; padding: 8px;
+}
+.intro h1 { font-size: 28px; line-height: 1.1; letter-spacing: -0.02em; text-wrap: balance; }
+.bajada { color: var(--muted); font-size: 16px; margin-top: -8px; }
+.intro ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 14px; counter-reset: paso; }
+.intro li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 12px; color: var(--muted); font-size: 14px; }
+.intro li::before {
+  counter-increment: paso; content: counter(paso);
+  width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+  border: 1.5px solid var(--marco); color: var(--marco); font-weight: 700; font-size: 14px;
+}
+.intro li b { display: block; color: var(--fg); font-weight: 600; font-size: 15px; }
+.error { color: var(--mal); font-weight: 600; font-size: 14px; }
+.acciones { display: flex; flex-wrap: wrap; gap: 10px; }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 46px; padding: 10px 18px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--fg);
+  font-weight: 600; text-align: center; text-decoration: none;
+}
+.btn.primario { background: var(--marco); border-color: var(--marco); color: var(--sobre-marco); }
+.btn.peligro { color: var(--mal); }
+.btn.armado { background: var(--mal); border-color: var(--mal); color: var(--sobre-mal); }
+.btn.chico { min-height: 38px; padding: 6px 14px; }
+.btn:disabled { opacity: .45; }
+
+/* ── visor de cámara ── */
+.view { position: relative; overflow: hidden; border-radius: 10px; background: #000; touch-action: none; }
+.view video { display: block; width: 100%; height: 100%; object-fit: cover; }
+.roi {
+  position: absolute; border: 2px solid var(--marco); border-radius: 6px;
+  box-shadow: 0 0 0 200vmax var(--velo); touch-action: none; cursor: move;
+}
+.view[data-e="movimiento"] .roi, .view[data-e="ajustando"] .roi { border-color: var(--mov); }
+.view[data-e="captura"] .roi { border-color: var(--ok); }
+.roi-tag {
+  position: absolute; left: 8px; top: 8px; pointer-events: none;
+  padding: 2px 7px; border-radius: 5px; background: var(--marco); color: var(--sobre-marco);
+  font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap;
+}
+.esq { position: absolute; width: 44px; height: 44px; }
+.esq::after {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px;
+  border-radius: 50%; background: var(--marco); box-shadow: 0 0 0 2px var(--velo);
+}
+.esq[data-h="nw"] { left: -22px; top: -22px; cursor: nwse-resize; }
+.esq[data-h="ne"] { right: -22px; top: -22px; cursor: nesw-resize; }
+.esq[data-h="sw"] { left: -22px; bottom: -22px; cursor: nesw-resize; }
+.esq[data-h="se"] { right: -22px; bottom: -22px; cursor: nwse-resize; }
+.app[data-modo="escaneando"] .roi { pointer-events: none; cursor: default; }
+.app[data-modo="escaneando"] .esq, .app[data-modo="escaneando"] .roi-tag, .app[data-modo="escaneando"] .pista { display: none; }
+.flash { position: absolute; top: 0; right: 0; bottom: 0; left: 0; background: var(--destello); opacity: 0; pointer-events: none; }
+.flash.on { animation: destello .3s ease-out; }
+@keyframes destello { from { opacity: .55; } to { opacity: 0; } }
+.pista {
+  position: absolute; left: 0; right: 0; bottom: 14px; padding: 0 16px; pointer-events: none;
+  text-align: center; font-size: 13px; font-weight: 600; text-shadow: 0 1px 3px #000, 0 0 12px #000;
+}
+.medidor {
+  position: absolute; left: 12px; right: 12px; bottom: 9px; height: 4px; border-radius: 2px;
+  background: rgba(255, 255, 255, .2); display: none;
+}
+.app[data-modo="escaneando"] .medidor { display: block; }
+.medidor i { display: block; width: 0; height: 100%; border-radius: 2px; background: var(--mov); transition: width .08s linear; }
+.medidor b { position: absolute; top: -3px; width: 2px; height: 10px; border-radius: 1px; background: var(--fg); }
+.toast {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 5;
+  max-width: calc(100% - 32px); padding: 8px 14px; border-radius: 10px;
+  background: var(--panel-2); border: 1px solid var(--mal); font-size: 14px; font-weight: 600; text-align: center;
+}
+
+/* ── barra de controles ── */
+.bar {
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px;
+  padding: 10px max(16px, env(safe-area-inset-right, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+}
+.izq { justify-self: start; }
+.der { justify-self: end; display: flex; gap: 4px; }
+.tool {
+  display: grid; justify-items: center; gap: 4px; min-width: 56px; padding: 4px 6px;
+  border: 0; border-radius: 12px; background: none; font-size: 11px; font-weight: 600;
+}
+.tool:disabled { opacity: .4; }
+.ico {
+  width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center;
+  background: var(--panel-2) center / cover no-repeat; border: 1px solid var(--line);
+}
+.ico svg, .circ svg { width: 22px; height: 22px; }
+.ico.con-foto svg { display: none; }
+.ico.salto { animation: salto .32s ease-out; }
+@keyframes salto { 40% { transform: scale(1.18); } }
+.principal { display: grid; justify-items: center; gap: 6px; padding: 0 6px; border: 0; background: none; font-size: 11px; font-weight: 700; }
+.circ {
+  width: 66px; height: 66px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--marco); color: var(--sobre-marco);
+  box-shadow: 0 0 0 3px var(--bg), 0 0 0 5px var(--marco);
+}
+.circ svg { width: 28px; height: 28px; display: none; }
+.app[data-modo="inicio"] .i-cam, .app[data-modo="pausa"] .i-play, .app[data-modo="escaneando"] .i-pausa { display: block; }
+.app[data-modo="escaneando"] .circ { background: var(--panel-2); color: var(--fg); }
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .app { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto minmax(0, 1fr); }
+  .top, .stage { grid-column: 1; }
+  .bar {
+    grid-column: 2; grid-row: 1 / span 2; grid-template-columns: none; grid-template-rows: 1fr auto 1fr; justify-items: center;
+    padding: calc(10px + env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) 12px;
+  }
+  .izq { justify-self: center; align-self: start; }
+  .der { justify-self: center; align-self: end; flex-direction: column; }
+}
+
+/* ── paneles ── */
+.hoja {
+  position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 20; background: var(--bg);
+  display: grid; grid-template-rows: auto minmax(0, 1fr); grid-template-columns: minmax(0, 1fr);
+}
+#hojaExportar { z-index: 40; }
+.hoja > header, .visor > header, .visor > footer {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px max(16px, env(safe-area-inset-right, 0px)) 10px max(16px, env(safe-area-inset-left, 0px));
+}
+.hoja > header, .visor > header { padding-top: calc(10px + env(safe-area-inset-top, 0px)); border-bottom: 1px solid var(--line); }
+.hoja h2 { flex: 1; min-width: 0; font-size: 19px; letter-spacing: -0.01em; }
+.tenue { color: var(--muted); font-weight: 500; font-size: 14px; font-variant-numeric: tabular-nums; }
+.cuerpo {
+  overflow: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+  padding: 16px max(16px, env(safe-area-inset-right, 0px)) calc(28px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+}
+.cuerpo.angosto > * { max-width: 44rem; margin-left: auto; margin-right: auto; }
+.nota { padding: 10px 12px; border-radius: 10px; border: 1px solid var(--mal); font-size: 14px; margin-bottom: 14px; }
+.vacio { color: var(--muted); padding: 32px 0; text-align: center; }
+#fotosAcciones { margin-bottom: 16px; }
+.rejilla { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
+.mini {
+  position: relative; aspect-ratio: 5 / 7; padding: 0; overflow: hidden;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+}
+.mini img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.mini span {
+  position: absolute; left: 4px; bottom: 4px; padding: 1px 6px; border-radius: 6px;
+  background: var(--velo); font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+
+.grupo { display: grid; gap: 16px; padding-bottom: 22px; }
+.grupo + .grupo { border-top: 1px solid var(--line); padding-top: 22px; }
+.grupo h3 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.fila { display: grid; gap: 6px; }
+.fila label { display: flex; justify-content: space-between; gap: 12px; font-weight: 600; }
+.fila output { color: var(--marco); font-variant-numeric: tabular-nums; }
+.fila p, .sw small { color: var(--muted); font-size: 13px; font-weight: 400; }
+input[type="range"] { width: 100%; height: 30px; margin: 0; accent-color: var(--marco); }
+select {
+  width: 100%; min-height: 44px; padding: 8px 10px; border-radius: 10px; font-size: 16px;
+  border: 1px solid var(--line); background: var(--panel-2);
+}
+.sw { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center; }
+.sw b { display: block; font-weight: 600; }
+.sw small { display: block; }
+.sw input {
+  -webkit-appearance: none; appearance: none; position: relative; margin: 0;
+  width: 50px; height: 30px; border-radius: 15px; background: var(--line); transition: background .15s;
+}
+.sw input::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%;
+  background: var(--fg); transition: transform .15s;
+}
+.sw input:checked { background: var(--ok); }
+.sw input:checked::after { transform: translateX(20px); }
+.diag { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+.visor {
+  position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 30; background: var(--bg);
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr);
+}
+.visor > header .tenue { flex: 1; min-width: 0; text-align: center; }
+.visor > footer { justify-content: space-between; padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+.lienzo { position: relative; min-height: 0; }
+.lienzo img { position: absolute; top: 8px; left: 8px; width: calc(100% - 16px); height: calc(100% - 16px); object-fit: contain; }
+
+.exp { display: grid; gap: 10px; padding-bottom: 22px; }
+.exp + .exp { border-top: 1px solid var(--line); padding-top: 22px; }
+.exp h3 { font-size: 16px; }
+.exp p { color: var(--muted); font-size: 14px; }
+.exp-lista { display: grid; gap: 8px; }
+.exp-fila { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--muted); }
+.exp-fila .btn { flex: 1 1 14rem; min-width: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .flash.on, .ico.salto { animation: none; }
+  .medidor i, .sw input, .sw input::after { transition: none; }
+}
+</style>
+</head>
+<body>
+
+<div class="app" id="app" data-modo="inicio">
+  <header class="top">
+    <div class="estado" id="estado" data-e="apagada" role="status" aria-live="polite"><span class="punto"></span><span id="estadoTxt">Cámara apagada</span></div>
+    <div class="cuenta"><b id="cuentaNum">0</b> <span id="cuentaTxt">fotos</span></div>
+  </header>
+
+  <main class="stage" id="stage">
+    <section class="intro" id="intro">
+      <h1>Escáner de cartas</h1>
+      <p class="bajada">Saca una foto sola cada vez que cae una carta nueva en la caja.</p>
+      <ol>
+        <li><span><b>Fija el equipo sobre la caja</b>Con la cámara trasera mirando hacia abajo y luz pareja, sin reflejos.</span></li>
+        <li><span><b>Ajusta el marco amarillo</b>Arrastra las esquinas hasta cubrir la zona donde caen las cartas.</span></li>
+        <li><span><b>Toca Iniciar y tira las cartas de a una</b>La foto sale cuando la carta queda quieta.</span></li>
+      </ol>
+      <p class="error" id="introError" hidden></p>
+      <div class="acciones">
+        <button class="btn primario" id="btnActivar" type="button">Activar cámara</button>
+        <button class="btn" id="btnDemo" type="button">Ver demostración sin cámara</button>
+      </div>
+    </section>
+
+    <div class="view" id="view" hidden>
+      <video id="video" playsinline webkit-playsinline muted autoplay></video>
+      <div class="roi" id="roi">
+        <span class="roi-tag">Zona de la carta</span>
+        <span class="esq" data-h="nw"></span><span class="esq" data-h="ne"></span><span class="esq" data-h="sw"></span><span class="esq" data-h="se"></span>
+      </div>
+      <div class="flash" id="flash"></div>
+      <p class="pista">Arrastra el marco hasta la zona donde caen las cartas y toca Iniciar.</p>
+      <div class="medidor" aria-hidden="true"><i id="medFill"></i><b id="medUmbral"></b></div>
+    </div>
+    <button class="chip" id="btnSalirDemo" type="button" hidden>Demostración · Salir</button>
+    <div class="toast" id="toast" role="alert" hidden></div>
+  </main>
+
+  <footer class="bar">
+    <div class="izq">
+      <button class="tool" id="btnFotos" type="button">
+        <span class="ico" id="icoFotos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2.5"/><circle cx="8.5" cy="10" r="1.6"/><path d="M21 15.5l-4.8-4.8a1 1 0 0 0-1.4 0L7 18.5"/></svg></span>
+        <span>Fotos</span>
+      </button>
+    </div>
+    <button class="principal" id="btnMain" type="button">
+      <span class="circ">
+        <svg class="i-cam" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.2l1.2-1.8h6.2L16.3 6h1.2A2.5 2.5 0 0 1 20 8.5v8a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.500z"/><circle cx="12" cy="12.5" r="3.3"/></svg>
+        <svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 5.2v13.6L19.5 12z" fill="currentColor"/></svg>
+        <svg class="i-pausa" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5.5" width="4" height="13" rx="1" fill="currentColor"/><rect x="13.5" y="5.5" width="4" height="13" rx="1" fill="currentColor"/></svg>
+      </span>
+      <span id="mainTxt">Activar</span>
+    </button>
+    <div class="der">
+      <button class="tool" id="btnManual" type="button" disabled>
+        <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.6" fill="currentColor" stroke="none"/></svg></span>
+        <span>Manual</span>
+      </button>
+      <button class="tool" id="btnAjustes" type="button">
+        <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h9M19 7h1M4 17h1M11 17h9"/><circle cx="16" cy="7" r="2.4"/><circle cx="8" cy="17" r="2.4"/></svg></span>
+        <span>Ajustes</span>
+      </button>
+    </div>
+  </footer>
+</div>
+
+<section class="hoja" id="hojaFotos" hidden aria-label="Fotos">
+  <header>
+    <h2>Fotos <span class="tenue" id="fotosResumen"></span></h2>
+    <button class="btn chico" id="btnCerrarFotos" type="button">Cerrar</button>
+  </header>
+  <div class="cuerpo">
+    <p class="nota" id="notaVolatil" hidden>Este navegador no dejó guardar las fotos en el equipo. Expórtalas antes de cerrar la página.</p>
+    <div class="acciones" id="fotosAcciones" hidden>
+      <button class="btn primario" id="btnExportar" type="button">Exportar</button>
+      <button class="btn peligro" id="btnBorrarTodo" type="button">Borrar todo</button>
+    </div>
+    <p class="vacio" id="fotosVacio">Todavía no hay fotos. Las que saque el escáner aparecen aquí.</p>
+    <div class="rejilla" id="rejilla"></div>
+  </div>
+</section>
+
+<section class="hoja" id="hojaAjustes" hidden aria-label="Ajustes">
+  <header>
+    <h2>Ajustes</h2>
+    <button class="btn chico" id="btnCerrarAjustes" type="button">Listo</button>
+  </header>
+  <div class="cuerpo angosto">
+    <div class="grupo">
+      <h3>Detección</h3>
+      <div class="fila">
+        <label for="inSens">Sensibilidad <output id="outSens" for="inSens"></output></label>
+        <input type="range" id="inSens" min="1" max="10" step="1">
+        <p>Súbela si se salta cartas. Bájala si saca fotos sin que caiga una carta.</p>
+      </div>
+      <div class="fila">
+        <label for="inEspera">Espera antes de la foto <output id="outEspera" for="inEspera"></output></label>
+        <input type="range" id="inEspera" min="200" max="2000" step="100">
+        <p>Tiempo que la carta debe estar quieta. Súbelo si las fotos salen movidas o con la mano.</p>
+      </div>
+      <label class="sw" for="inDedupe">
+        <span><b>Descartar si la imagen no cambió</b><small>No saca foto cuando solo pasó la mano. Apágalo si tiras copias idénticas de una misma carta.</small></span>
+        <input type="checkbox" id="inDedupe">
+      </label>
+      <label class="sw" for="inSonido">
+        <span><b>Sonido al sacar la foto</b><small>En iPhone no suena con el interruptor de silencio activado.</small></span>
+        <input type="checkbox" id="inSonido">
+      </label>
+      <p class="diag" id="diag">Inicia el escaneo para ver las mediciones en vivo.</p>
+    </div>
+    <div class="grupo" id="grupoCam">
+      <h3>Cámara</h3>
+      <div class="fila" id="filaCam" hidden>
+        <label for="selCam">Cámara</label>
+        <select id="selCam"></select>
+      </div>
+      <div class="fila">
+        <label for="selRes">Resolución</label>
+        <select id="selRes">
+          <option value="max">Máxima del equipo (hasta 4K)</option>
+          <option value="fhd">Full HD (1920 × 1080)</option>
+          <option value="hd">HD (1280 × 720)</option>
+        </select>
+        <p id="resInfo"></p>
+      </div>
+      <div class="fila" id="filaZoom" hidden>
+        <label for="inZoom">Zoom <output id="outZoom" for="inZoom"></output></label>
+        <input type="range" id="inZoom">
+      </div>
+      <label class="sw" id="filaLuz" for="inLuz" hidden>
+        <span><b>Linterna</b><small>Puede producir reflejos en cartas con funda.</small></span>
+        <input type="checkbox" id="inLuz">
+      </label>
+    </div>
+    <div class="grupo">
+      <h3>Foto</h3>
+      <div class="fila">
+        <label for="inCalidad">Calidad JPEG <output id="outCalidad" for="inCalidad"></output></label>
+        <input type="range" id="inCalidad" min="60" max="100" step="5">
+        <p>Más calidad significa archivos más pesados.</p>
+      </div>
+      <button class="btn" id="btnRoiReset" type="button">Restablecer la zona de la carta</button>
+    </div>
+  </div>
+</section>
+
+<section class="visor" id="visor" hidden aria-label="Foto">
+  <header>
+    <button class="btn chico" id="btnVisorCerrar" type="button">Cerrar</button>
+    <span class="tenue" id="visorInfo"></span>
+    <button class="btn chico peligro" id="btnVisorBorrar" type="button">Borrar</button>
+  </header>
+  <div class="lienzo"><img id="visorImg" alt=""></div>
+  <footer>
+    <button class="btn chico" id="btnVisorPrev" type="button">Anterior</button>
+    <span class="tenue" id="visorPos"></span>
+    <button class="btn chico" id="btnVisorNext" type="button">Siguiente</button>
+  </footer>
+</section>
+
+<section class="hoja" id="hojaExportar" hidden aria-label="Exportar fotos">
+  <header>
+    <h2>Exportar fotos</h2>
+    <button class="btn chico" id="btnCerrarExportar" type="button">Cerrar</button>
+  </header>
+  <div class="cuerpo angosto">
+    <div class="exp">
+      <h3>Archivo ZIP</h3>
+      <p>Todas las fotos en un archivo. En iPhone y iPad queda en la app Archivos, carpeta Descargas.</p>
+      <div class="exp-lista" id="expZip"></div>
+    </div>
+    <div class="exp" id="expCompartir" hidden>
+      <h3>Guardar en Fotos o compartir</h3>
+      <p>Abre el menú de compartir del equipo. Ahí puedes elegir "Guardar imágenes", AirDrop u otra app.</p>
+      <div class="exp-lista" id="expLotes"></div>
+    </div>
+  </div>
+</section>
+
+<script>
+(() => {
+'use strict';
+
+/* ════════ Lógica pura: se prueba también fuera del navegador ════════ */
+/*<puro>*/
+const CRC_T = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_T[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function fechaDos(ms) {
+  const d = new Date(ms), y = Math.max(1980, d.getFullYear());
+  return {
+    hora: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
+    fecha: ((y - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate()
+  };
+}
+
+// ZIP sin compresión (los JPEG ya vienen comprimidos).
+// entradas: [{ name, data: Blob | Uint8Array, size, crc, ts }]
+function makeZip(entradas) {
+  const enc = new TextEncoder(), partes = [], central = [];
+  let pos = 0;
+  for (const e of entradas) {
+    const nombre = enc.encode(e.name), f = fechaDos(e.ts);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(8, 0, true);
+    lh.setUint16(10, f.hora, true); lh.setUint16(12, f.fecha, true);
+    lh.setUint32(14, e.crc, true); lh.setUint32(18, e.size, true); lh.setUint32(22, e.size, true);
+    lh.setUint16(26, nombre.length, true); lh.setUint16(28, 0, true);
+    partes.push(lh.buffer, nombre, e.data);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true); ch.setUint16(10, 0, true);
+    ch.setUint16(12, f.hora, true); ch.setUint16(14, f.fecha, true);
+    ch.setUint32(16, e.crc, true); ch.setUint32(20, e.size, true); ch.setUint32(24, e.size, true);
+    ch.setUint16(28, nombre.length, true); ch.setUint32(42, pos, true);
+    central.push(ch.buffer, nombre);
+    pos += 30 + nombre.length + e.size;
+  }
+  let tamCentral = 0;
+  for (const c of central) tamCentral += c.byteLength;
+  const fin = new DataView(new ArrayBuffer(22));
+  fin.setUint32(0, 0x06054b50, true); fin.setUint16(8, entradas.length, true); fin.setUint16(10, entradas.length, true);
+  fin.setUint32(12, tamCentral, true); fin.setUint32(16, pos, true);
+  return new Blob([...partes, ...central, fin.buffer], { type: 'application/zip' });
+}
+
+function partir(items, maxBytes) {
+  const out = []; let cur = [], suma = 0;
+  for (const it of items) {
+    if (cur.length && suma + it.size > maxBytes) { out.push(cur); cur = []; suma = 0; }
+    cur.push(it); suma += it.size;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+
+// Promedia bloques de box × box píxeles: baja el ruido del sensor antes de comparar.
+function celdas(l, w, h, box, out) {
+  const cw = w / box, ch = h / box, k = 1 / (box * box);
+  for (let cy = 0; cy < ch; cy++) for (let cx = 0; cx < cw; cx++) {
+    let s = 0;
+    for (let y = 0; y < box; y++) { const p = (cy * box + y) * w + cx * box; for (let x = 0; x < box; x++) s += l[p + x]; }
+    out[cy * cw + cx] = s * k;
+  }
+  return out;
+}
+
+// Energía de bordes: sube mientras la cámara termina de enfocar.
+function nitidez(l, w, h) {
+  let s = 0;
+  for (let y = 0; y < h - 1; y++) {
+    let p = y * w;
+    for (let x = 0; x < w - 1; x++, p++) { const a = l[p]; s += Math.abs(a - l[p + 1]) + Math.abs(a - l[p + w]); }
+  }
+  return s / ((w - 1) * (h - 1));
+}
+
+// Fracción de celdas que difieren más de T. Con norm compensa cambios de exposición.
+function fracDiff(a, b, T, norm) {
+  const n = a.length; let g = 1;
+  if (norm) {
+    let sa = 0, sb = 0;
+    for (let i = 0; i < n; i++) { sa += a[i]; sb += b[i]; }
+    if (sb > 1) { g = sa / sb; if (g < 0.75 || g > 1.33) g = 1; }
+  }
+  let c = 0;
+  for (let i = 0; i < n; i++) { const d = a[i] - b[i] * g; if (d > T || d < -T) c++; }
+  return c / n;
+}
+
+function umbrales(sens) {
+  const t = (Math.min(10, Math.max(1, sens)) - 1) / 9, ex = (lo, hi) => lo * Math.pow(hi / lo, t);
+  const motionHi = ex(0.04, 0.006);
+  return { pixT: ex(22, 7), motionHi, motionLo: motionHi * 0.35, minChange: ex(0.06, 0.008) };
+}
+
+function promedio(a) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i]; return s / a.length; }
+
+// Mediana de |a − b| (histograma de 0,25 niveles): mide el ruido del sensor aunque parte de la imagen se mueva.
+function difMediana(a, b) {
+  const h = new Uint32Array(81), n = a.length;
+  for (let i = 0; i < n; i++) { let d = a[i] - b[i]; if (d < 0) d = -d; h[d >= 20 ? 80 : (d * 4) | 0]++; }
+  let acum = 0;
+  for (let k = 0; k <= 80; k++) { acum += h[k]; if (acum >= n / 2) return (k + 0.5) / 4; }
+  return 20;
+}
+
+// Decide cuándo sacar la foto: hubo movimiento, la imagen se quedó quieta y cambió respecto de la última.
+// cfg: { sens, stableMs, dedupe } (se lee en cada cuadro, así los ajustes aplican al instante)
+function createDetector(cfg) {
+  const CALENTAR_MS = 500, MAX_TEMBLOR_MS = 2500, MAX_AJUSTE_MS = 700, REF_CADA_MS = 1500, MOV_GRANDE = 0.10;
+  let prev = null, ref = null, moviendo = false, pico = 0, nitPrev = 0, mediaPrev = 0, ruido = 0;
+  let tMov = 0, tFuerte = 0, tRef = 0, tListo = 0;
+  return {
+    reset() { prev = ref = null; moviendo = false; pico = 0; },
+    update(cur, nit, now) {
+      const u = umbrales(cfg.sens);
+      const media = promedio(cur);
+      if (!prev || prev.length !== cur.length) {
+        prev = Float32Array.from(cur); ref = Float32Array.from(cur);
+        moviendo = false; pico = 0; ruido = 0; nitPrev = nit; mediaPrev = media;
+        tMov = tFuerte = tRef = now; tListo = now + CALENTAR_MS;
+        return { motion: 0, change: null, state: 'quieto', capture: false };
+      }
+      const sigma = difMediana(cur, prev) / 0.6745;       // ruido del sensor entre dos cuadros
+      if (now < tListo) {            // la cámara todavía ajusta exposición: solo se actualiza la referencia
+        ruido = ruido ? ruido * 0.7 + sigma * 0.3 : sigma;
+        prev.set(cur); ref.set(cur); nitPrev = nit; mediaPrev = media; tMov = tFuerte = tRef = now;
+        return { motion: 0, change: null, state: 'quieto', capture: false };
+      }
+      const T = Math.max(u.pixT, 4.5 * ruido);             // con poca luz el umbral sube solo
+      const motion = fracDiff(cur, prev, T, false);
+      if (motion < u.motionHi) ruido = ruido * 0.9 + sigma * 0.1;
+      prev.set(cur);
+      if (motion >= u.motionHi) { moviendo = true; if (motion > pico) pico = motion; tMov = tFuerte = now; }
+      else if (motion >= u.motionLo) tMov = now;
+
+      let state = 'quieto', capture = false, change = null;
+      if (moviendo) {
+        const quieta = (now - tMov >= cfg.stableMs) || (now - tFuerte >= cfg.stableMs + MAX_TEMBLOR_MS);
+        // la cámara sigue ajustando (la nitidez sube) o corrigiendo la exposición (el brillo cambia): espera un poco más
+        const ajustando = (nit > nitPrev * 1.04 || Math.abs(media - mediaPrev) > mediaPrev * 0.006) &&
+                          (now - tMov) < cfg.stableMs + MAX_AJUSTE_MS && (now - tFuerte) < cfg.stableMs + MAX_TEMBLOR_MS + MAX_AJUSTE_MS;
+        if (!quieta) state = 'movimiento';
+        else if (ajustando) state = 'ajustando';
+        else {
+          change = fracDiff(cur, ref, T, true);
+          capture = change >= u.minChange || (!cfg.dedupe && pico >= MOV_GRANDE);
+          state = capture ? 'captura' : 'sin-cambio';
+          moviendo = false; pico = 0; ref.set(cur); tRef = now;
+        }
+      } else if (now - tMov >= cfg.stableMs && now - tRef >= REF_CADA_MS) {
+        ref.set(cur); tRef = now;    // sigue los cambios lentos de luz
+      }
+      nitPrev = nit; mediaPrev = media;
+      return { motion, change, state, capture };
+    }
+  };
+}
+/*</puro>*/
+
+/* ════════ Ajustes ════════ */
+const CLAVE = 'escaner-cartas.ajustes';
+const ROI_BASE = { x: 0.08, y: 0.08, w: 0.84, h: 0.84 };
+const BASE = { sens: 5, stableMs: 600, dedupe: true, sound: true, quality: 90, res: 'fhd', deviceId: '' };
+const RES = { max: [3840, 2160], fhd: [1920, 1080], hd: [1280, 720] };
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+function cargarAjustes() {
+  let o = {};
+  try { o = JSON.parse(localStorage.getItem(CLAVE) || '{}') || {}; } catch (e) {}
+  const c = Object.assign({}, BASE);
+  if (Number.isFinite(o.sens)) c.sens = clamp(Math.round(o.sens), 1, 10);
+  if (Number.isFinite(o.stableMs)) c.stableMs = clamp(o.stableMs, 200, 2000);
+  if (typeof o.dedupe === 'boolean') c.dedupe = o.dedupe;
+  if (typeof o.sound === 'boolean') c.sound = o.sound;
+  if (Number.isFinite(o.quality)) c.quality = clamp(o.quality, 60, 100);
+  if (RES[o.res]) c.res = o.res;
+  if (typeof o.deviceId === 'string') c.deviceId = o.deviceId;
+  const r = o.roi || {};
+  const ok = ['x', 'y', 'w', 'h'].every(k => Number.isFinite(r[k])) && r.w >= 0.15 && r.h >= 0.15 && r.x >= 0 && r.y >= 0 && r.x + r.w <= 1.0001 && r.y + r.h <= 1.0001;
+  c.roi = ok ? { x: r.x, y: r.y, w: r.w, h: r.h } : Object.assign({}, ROI_BASE);
+  return c;
+}
+function guardarAjustes() { try { localStorage.setItem(CLAVE, JSON.stringify(cfg)); } catch (e) {} }
+
+/* ════════ Almacén de fotos: IndexedDB, con respaldo en memoria ════════ */
+const almacen = (() => {
+  let db = null;
+  const mem = new Map();
+  const pedir = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  const fin = t => new Promise((res, rej) => { t.oncomplete = () => res(); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new Error('abort')); });
+  return {
+    async init() {
+      try {
+        db = await new Promise((res, rej) => {
+          const o = indexedDB.open('escaner-cartas', 1);
+          const limite = setTimeout(() => rej(new Error('lento')), 2500);
+          o.onupgradeneeded = () => { o.result.createObjectStore('meta', { keyPath: 'id' }); o.result.createObjectStore('datos'); };
+          o.onsuccess = () => { clearTimeout(limite); res(o.result); };
+          o.onerror = () => { clearTimeout(limite); rej(o.error); };
+        });
+        const todas = await pedir(db.transaction('meta', 'readonly').objectStore('meta').getAll());
+        return todas.sort((a, b) => a.id - b.id);
+      } catch (e) { db = null; return []; }
+    },
+    async add(meta, buf, blob) {
+      if (db) {
+        try {
+          const t = db.transaction(['meta', 'datos'], 'readwrite');
+          t.objectStore('meta').put(meta); t.objectStore('datos').put(buf, meta.id);
+          await fin(t);
+          return true;
+        } catch (e) { /* sin espacio u otro error: la foto queda en memoria */ }
+      }
+      mem.set(meta.id, blob);
+      return false;
+    },
+    async blob(id) {
+      if (mem.has(id)) return mem.get(id);
+      if (!db) return null;
+      const buf = await pedir(db.transaction('datos', 'readonly').objectStore('datos').get(id));
+      return buf ? new Blob([buf], { type: 'image/jpeg' }) : null;
+    },
+    async remove(id) {
+      mem.delete(id);
+      if (!db) return;
+      try { const t = db.transaction(['meta', 'datos'], 'readwrite'); t.objectStore('meta').delete(id); t.objectStore('datos').delete(id); await fin(t); } catch (e) {}
+    },
+    async clear() {
+      mem.clear();
+      if (!db) return;
+      try { const t = db.transaction(['meta', 'datos'], 'readwrite'); t.objectStore('meta').clear(); t.objectStore('datos').clear(); await fin(t); } catch (e) {}
+    }
+  };
+})();
+
+/* ════════ Elementos y estado ════════ */
+const $ = id => document.getElementById(id);
+const app = $('app'), stage = $('stage'), intro = $('intro'), view = $('view'), video = $('video'), roiEl = $('roi');
+const estado = $('estado'), estadoTxt = $('estadoTxt'), medFill = $('medFill'), medUmbral = $('medUmbral');
+const hojaFotos = $('hojaFotos'), hojaAjustes = $('hojaAjustes'), hojaExportar = $('hojaExportar'), visor = $('visor');
+const rejilla = $('rejilla'), icoFotos = $('icoFotos'), visorImg = $('visorImg');
+
+const TICK_MS = 80, AN = 256, BOX = 4, MINI = 240;
+const MAX_ZIP = 200 * 1024 * 1024, LOTE = 30;
+const ESTADOS = {
+  apagada: 'Cámara apagada', pausa: 'En pausa', quieto: 'Esperando carta', movimiento: 'Movimiento…',
+  ajustando: 'Ajustando imagen…', captura: 'Foto guardada', 'sin-cambio': 'Sin cambios, no se guardó'
+};
+
+const cfg = cargarAjustes();
+const detector = createDetector(cfg);
+let fotos = [], sigId = 1, volatil = false;
+let stream = null, pista = null, demo = null;
+let escaneando = false, ocupado = false, reloj = null, wakeLock = null, audio = null;
+let retenido = '', retenidoHasta = 0, ultimoCambio = null;
+let almacenListo = Promise.resolve();
+const cola = [], MAX_COLA = 4;      // fotos tomadas que esperan su turno para guardarse
+const lienzoAn = document.createElement('canvas'), ctxAn = lienzoAn.getContext('2d', { willReadFrequently: true });
+const lienzoMini = document.createElement('canvas'), ctxMini = lienzoMini.getContext('2d');
+let luma = null, celdasBuf = null;
+
+const nf1 = new Intl.NumberFormat('es', { maximumFractionDigits: 1 });
+const nf1fijo = new Intl.NumberFormat('es', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const peso = b => b >= 1048576 ? nf1.format(b / 1048576) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
+const nFotos = n => n + (n === 1 ? ' foto' : ' fotos');
+const nombreArchivo = f => 'carta-' + String(f.id).padStart(4, '0') + '.jpg';
+
+function setEstado(e) {
+  if (estado.dataset.e === e) return;
+  estado.dataset.e = e; view.dataset.e = e; estadoTxt.textContent = ESTADOS[e];
+}
+function setModo(m) {
+  app.dataset.modo = m;
+  $('mainTxt').textContent = m === 'inicio' ? 'Activar' : m === 'pausa' ? 'Iniciar' : 'Pausar';
+  $('btnMain').setAttribute('aria-label', m === 'inicio' ? 'Activar cámara' : m === 'pausa' ? 'Iniciar escaneo' : 'Pausar escaneo');
+}
+let relojAviso = 0;
+function aviso(msg) {
+  const t = $('toast'); t.textContent = msg; t.hidden = false;
+  clearTimeout(relojAviso); relojAviso = setTimeout(() => { t.hidden = true; }, 4000);
+}
+
+/* ════════ Cámara ════════ */
+function textoError(e) {
+  if (e === 'sin-api') {
+    return window.isSecureContext === false
+      ? 'La cámara solo funciona si la página se abre con una dirección https://.'
+      : 'Este navegador no deja usar la cámara desde una página web. En iPhone y iPad, ábrela con Safari.';
+  }
+  const n = e && e.name;
+  if (n === 'NotAllowedError' || n === 'SecurityError') return 'No hay permiso para usar la cámara. En Safari, toca el ícono a la izquierda de la dirección, entra a Ajustes del sitio web, deja Cámara en Permitir y vuelve a intentarlo.';
+  if (n === 'NotFoundError' || n === 'OverconstrainedError') return 'No se encontró una cámara en este equipo.';
+  if (n === 'NotReadableError' || n === 'AbortError') return 'La cámara está ocupada por otra app. Ciérrala y vuelve a intentarlo.';
+  return 'No se pudo abrir la cámara. Vuelve a intentarlo.';
+}
+
+async function abrirCamara() {
+  cerrarStream();
+  $('introError').hidden = true;
+  let s = null, err = 'sin-api';
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    const [w, h] = RES[cfg.res];
+    const tam = { width: { ideal: w }, height: { ideal: h } };
+    const intentos = [];
+    if (cfg.deviceId) intentos.push(Object.assign({ deviceId: { exact: cfg.deviceId } }, tam));
+    intentos.push(Object.assign({ facingMode: { ideal: 'environment' } }, tam), true);
+    for (const v of intentos) {
+      try { s = await navigator.mediaDevices.getUserMedia({ video: v, audio: false }); break; }
+      catch (e) { err = e; if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) break; }
+    }
+  }
+  if (!s) {
+    alInicio();
+    $('introError').textContent = textoError(err); $('introError').hidden = false;
+    return false;
+  }
+  await conectar(s, null);
+  return true;
+}
+
+function conTamano() {
+  return new Promise(res => {
+    if (video.videoWidth) return res();
+    const listo = () => { clearTimeout(t); video.removeEventListener('loadedmetadata', listo); video.removeEventListener('resize', listo); res(); };
+    const t = setTimeout(listo, 3000);
+    video.addEventListener('loadedmetadata', listo); video.addEventListener('resize', listo);
+  });
+}
+
+async function conectar(s, d) {
+  stream = s; demo = d; pista = s.getVideoTracks()[0] || null;
+  video.srcObject = s;
+  try { await video.play(); } catch (e) {}
+  await conTamano();
+  if (stream !== s) return;
+  intro.hidden = true; view.hidden = false;
+  $('btnManual').disabled = false; $('btnSalirDemo').hidden = !d;
+  setModo('pausa'); setEstado('pausa');
+  encuadrar(); pintarRoi(); detector.reset();
+  if (pista) pista.addEventListener('ended', alCortarse);
+  refrescarCamara();
+}
+
+function cerrarStream() {
+  if (escaneando) pausar();
+  if (pista) pista.removeEventListener('ended', alCortarse);
+  if (demo) { demo.stop(); demo = null; }
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null; pista = null; video.srcObject = null;
+}
+
+function alInicio() {
+  cerrarStream();
+  view.hidden = true; intro.hidden = false;
+  $('btnManual').disabled = true; $('btnSalirDemo').hidden = true;
+  setModo('inicio'); setEstado('apagada');
+  refrescarCamara();
+}
+
+async function reabrir() {
+  const seguia = escaneando;
+  if (await abrirCamara() && seguia) iniciar();
+}
+function alCortarse() { if (!document.hidden) reabrir(); }
+
+async function refrescarCamara() {
+  const real = !!stream && !demo;
+  $('grupoCam').hidden = !!demo;
+  $('resInfo').textContent = real && video.videoWidth ? 'La cámara entrega ' + video.videoWidth + ' × ' + video.videoHeight + ' px.' : '';
+  const filaCam = $('filaCam'), sel = $('selCam'), filaZoom = $('filaZoom'), filaLuz = $('filaLuz');
+  filaCam.hidden = filaZoom.hidden = filaLuz.hidden = true;
+  if (!real) return;
+  const actual = pista && pista.getSettings ? pista.getSettings() : {};
+  try {
+    const camaras = (await navigator.mediaDevices.enumerateDevices()).filter(c => c.kind === 'videoinput' && c.deviceId);
+    if (camaras.length > 1) {
+      sel.textContent = '';
+      camaras.forEach((c, i) => { const o = document.createElement('option'); o.value = c.deviceId; o.textContent = c.label || 'Cámara ' + (i + 1); sel.append(o); });
+      if (actual.deviceId) sel.value = actual.deviceId;
+      filaCam.hidden = false;
+    }
+  } catch (e) {}
+  const cap = pista && pista.getCapabilities ? pista.getCapabilities() : {};
+  if (cap.zoom && cap.zoom.max > cap.zoom.min) {
+    const z = $('inZoom');
+    z.min = cap.zoom.min; z.max = Math.min(cap.zoom.max, cap.zoom.min * 8); z.step = cap.zoom.step || 0.1;
+    z.value = actual.zoom || cap.zoom.min; $('outZoom').textContent = nf1.format(+z.value) + '×';
+    filaZoom.hidden = false;
+  }
+  if (cap.torch) { $('inLuz').checked = !!actual.torch; filaLuz.hidden = false; }
+}
+function restringir(c) { if (pista && pista.applyConstraints) pista.applyConstraints({ advanced: [c] }).catch(() => {}); }
+
+/* ════════ Encuadre y zona de la carta ════════ */
+function encuadrar() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh || view.hidden) return;
+  const cs = getComputedStyle(stage);
+  const sw = stage.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight), sh = stage.clientHeight;
+  let w = sw, h = w * vh / vw;
+  if (h > sh) { h = sh; w = h * vw / vh; }
+  view.style.width = Math.floor(w) + 'px'; view.style.height = Math.floor(h) + 'px';
+}
+if (window.ResizeObserver) new ResizeObserver(encuadrar).observe(stage); else window.addEventListener('resize', encuadrar);
+video.addEventListener('resize', () => { encuadrar(); detector.reset(); refrescarCamara(); });
+video.addEventListener('pause', () => { if (stream && !document.hidden) video.play().catch(() => {}); });
+
+function pintarRoi() {
+  const r = cfg.roi;
+  roiEl.style.left = r.x * 100 + '%'; roiEl.style.top = r.y * 100 + '%';
+  roiEl.style.width = r.w * 100 + '%'; roiEl.style.height = r.h * 100 + '%';
+}
+function roiPx() {
+  const vw = video.videoWidth, vh = video.videoHeight, r = cfg.roi;
+  const x = clamp(Math.round(r.x * vw), 0, vw - 16), y = clamp(Math.round(r.y * vh), 0, vh - 16);
+  return { x, y, w: clamp(Math.round(r.w * vw), 16, vw - x), h: clamp(Math.round(r.h * vh), 16, vh - y) };
+}
+let arrastre = null;
+roiEl.addEventListener('pointerdown', e => {
+  if (escaneando) return;
+  arrastre = { x: e.clientX, y: e.clientY, r: Object.assign({}, cfg.roi), h: e.target.dataset.h || 'mover' };
+  try { roiEl.setPointerCapture(e.pointerId); } catch (err) {}
+  e.preventDefault();
+});
+roiEl.addEventListener('pointermove', e => {
+  if (!arrastre) return;
+  const dx = (e.clientX - arrastre.x) / view.clientWidth, dy = (e.clientY - arrastre.y) / view.clientHeight, MIN = 0.15;
+  let { x, y, w, h } = arrastre.r;
+  const m = arrastre.h;
+  if (m === 'mover') { x = clamp(x + dx, 0, 1 - w); y = clamp(y + dy, 0, 1 - h); }
+  else {
+    let x2 = x + w, y2 = y + h;
+    if (m[1] === 'w') x = clamp(x + dx, 0, x2 - MIN); else x2 = clamp(x2 + dx, x + MIN, 1);
+    if (m[0] === 'n') y = clamp(y + dy, 0, y2 - MIN); else y2 = clamp(y2 + dy, y + MIN, 1);
+    w = x2 - x; h = y2 - y;
+  }
+  cfg.roi = { x, y, w, h }; pintarRoi();
+});
+const soltar = () => { if (!arrastre) return; arrastre = null; guardarAjustes(); detector.reset(); };
+roiEl.addEventListener('pointerup', soltar); roiEl.addEventListener('pointercancel', soltar);
+
+/* ════════ Análisis de cada cuadro ════════ */
+function leerCuadro() {
+  const vw = video.videoWidth, vh = video.videoHeight, r = roiPx();
+  let aw, ah;
+  if (r.w >= r.h) { aw = AN; ah = Math.max(BOX * 4, Math.round(AN * r.h / r.w / BOX) * BOX); }
+  else { ah = AN; aw = Math.max(BOX * 4, Math.round(AN * r.w / r.h / BOX) * BOX); }
+  if (lienzoAn.width !== aw || lienzoAn.height !== ah || !luma) {
+    lienzoAn.width = aw; lienzoAn.height = ah;
+    luma = new Uint8Array(aw * ah); celdasBuf = new Float32Array((aw / BOX) * (ah / BOX));
+  }
+  const sx = aw / r.w, sy = ah / r.h;
+  ctxAn.drawImage(video, -r.x * sx, -r.y * sy, vw * sx, vh * sy);
+  const d = ctxAn.getImageData(0, 0, aw, ah).data;
+  for (let i = 0, j = 0; j < luma.length; i += 4, j++) luma[j] = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+  return { cells: celdas(luma, aw, ah, BOX, celdasBuf), nit: nitidez(luma, aw, ah) };
+}
+
+function tick() {
+  if (!escaneando || document.hidden || video.readyState < 2 || !video.videoWidth) return;
+  const now = performance.now();
+  let c;
+  try { c = leerCuadro(); } catch (e) { return; }
+  const r = detector.update(c.cells, c.nit, now);
+  if (r.capture) capturar('auto');
+  if (r.state === 'captura' || r.state === 'sin-cambio') { retenido = r.state; retenidoHasta = now + 900; }
+  else if (r.state !== 'quieto') retenidoHasta = 0;
+  setEstado(now < retenidoHasta ? retenido : r.state);
+  medFill.style.width = (Math.min(1, Math.sqrt(r.motion / 0.3)) * 100).toFixed(1) + '%';
+  if (r.change !== null) ultimoCambio = r.change;
+  if (!hojaAjustes.hidden) {
+    const u = umbrales(cfg.sens);
+    $('diag').textContent = 'Movimiento ' + nf1fijo.format(r.motion * 100) + ' % (dispara con ' + nf1fijo.format(u.motionHi * 100) +
+      ' %) · Último cambio ' + (ultimoCambio === null ? 'sin datos' : nf1fijo.format(ultimoCambio * 100) + ' %') + ' (guarda con ' + nf1fijo.format(u.minChange * 100) + ' %)';
+  }
+}
+
+function pintarUmbral() { medUmbral.style.left = (Math.sqrt(umbrales(cfg.sens).motionHi / 0.3) * 100).toFixed(1) + '%'; }
+
+/* ════════ Captura ════════ */
+function destello() {
+  const f = $('flash'); f.classList.remove('on'); void f.offsetWidth; f.classList.add('on');
+  icoFotos.classList.remove('salto'); void icoFotos.offsetWidth; icoFotos.classList.add('salto');
+}
+function activarAudio() {
+  try {
+    if (!audio) { const C = window.AudioContext || window.webkitAudioContext; if (C) audio = new C(); }
+    if (audio && audio.state === 'suspended') audio.resume();
+  } catch (e) {}
+}
+function pitido() {
+  if (!cfg.sound || !audio || audio.state !== 'running') return;
+  try {
+    const t = audio.currentTime, o = audio.createOscillator(), g = audio.createGain();
+    o.type = 'sine'; o.frequency.value = 1175;
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.22, t + 0.012); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
+    o.connect(g); g.connect(audio.destination); o.start(t); o.stop(t + 0.17);
+  } catch (e) {}
+}
+
+// La foto se toma al instante en un lienzo propio y se codifica después, en fila:
+// así no se pierde una carta si la anterior todavía se está guardando.
+function capturar(tipo) {
+  if (!stream || !video.videoWidth) return;
+  if (cola.length >= MAX_COLA) { aviso('El equipo no alcanza a guardar tan rápido. Espera un momento antes de la próxima carta.'); return; }
+  const vw = video.videoWidth, vh = video.videoHeight, r = roiPx();
+  const c = document.createElement('canvas');
+  c.width = r.w; c.height = r.h;
+  c.getContext('2d').drawImage(video, -r.x, -r.y, vw, vh);
+  destello(); pitido();
+  cola.push({ c, ts: Date.now(), auto: tipo === 'auto' });
+  pintarCuenta();
+  procesarCola();
+}
+
+async function procesarCola() {
+  if (ocupado) return;
+  ocupado = true;
+  while (cola.length) {
+    const it = cola[0], c = it.c;
+    try {
+      const k = Math.min(1, MINI / Math.max(c.width, c.height));
+      lienzoMini.width = Math.max(1, Math.round(c.width * k)); lienzoMini.height = Math.max(1, Math.round(c.height * k));
+      ctxMini.drawImage(c, 0, 0, lienzoMini.width, lienzoMini.height);
+      const thumb = lienzoMini.toDataURL('image/jpeg', 0.72);
+      const blob = await new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('jpeg')), 'image/jpeg', cfg.quality / 100));
+      const buf = await (blob.arrayBuffer ? blob.arrayBuffer() : new Response(blob).arrayBuffer());
+      await almacenListo;            // la numeración sigue a las fotos ya guardadas
+      const meta = { id: sigId++, ts: it.ts, w: c.width, h: c.height, size: blob.size, crc: crc32(new Uint8Array(buf)), thumb, auto: it.auto };
+      if (!(await almacen.add(meta, buf, blob))) volatil = true;
+      fotos.push(meta); pintarMini(meta);
+    } catch (e) {
+      aviso('No se pudo guardar una foto. Vuelve a intentarlo.');
+    }
+    c.width = c.height = 0;          // devuelve la memoria del lienzo de inmediato (iOS la limita)
+    cola.shift(); pintarCuenta();
+  }
+  ocupado = false;
+}
+
+/* ════════ Escaneo ════════ */
+async function despierto() {
+  try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch (e) {}
+}
+function iniciar() {
+  if (!stream) return;
+  escaneando = true; detector.reset(); retenidoHasta = 0; ultimoCambio = null;
+  setModo('escaneando'); setEstado('quieto'); pintarUmbral();
+  if (!reloj) reloj = setInterval(tick, TICK_MS);
+  despierto();
+}
+function pausar() {
+  escaneando = false; clearInterval(reloj); reloj = null;
+  setModo(stream ? 'pausa' : 'inicio'); setEstado(stream ? 'pausa' : 'apagada');
+  medFill.style.width = '0';
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  detector.reset();
+  if (!stream) return;
+  if (escaneando) despierto();
+  if (!demo && (!pista || pista.readyState === 'ended')) reabrir(); else video.play().catch(() => {});
+});
+
+/* ════════ Galería ════════ */
+function pintarMini(f) {
+  const b = document.createElement('button'), i = new Image(), s = document.createElement('span');
+  b.type = 'button'; b.className = 'mini'; b.dataset.id = f.id; b.setAttribute('aria-label', 'Foto ' + f.id);
+  i.alt = ''; i.src = f.thumb; s.textContent = f.id;
+  b.append(i, s); b.addEventListener('click', () => abrirVisor(f.id));
+  rejilla.prepend(b);
+}
+function pintarCuenta() {
+  const n = fotos.length, total = fotos.reduce((s, f) => s + f.size, 0), ultima = fotos[n - 1];
+  const conCola = n + cola.length;   // el contador de arriba sube apenas se toma la foto
+  $('cuentaNum').textContent = conCola; $('cuentaTxt').textContent = conCola === 1 ? 'foto' : 'fotos';
+  $('fotosResumen').textContent = n ? n + ' · ' + peso(total) : '';
+  $('fotosVacio').hidden = n > 0; $('fotosAcciones').hidden = n === 0; $('notaVolatil').hidden = !(n && volatil);
+  icoFotos.style.backgroundImage = ultima ? 'url("' + ultima.thumb + '")' : '';
+  icoFotos.classList.toggle('con-foto', !!ultima);
+  $('btnFotos').setAttribute('aria-label', 'Ver fotos, ' + nFotos(n));
+}
+
+let visorId = null, visorUrl = '';
+async function abrirVisor(id) {
+  const i = fotos.findIndex(f => f.id === id);
+  if (i < 0) return cerrarVisor();
+  const f = fotos[i];
+  visorId = id; visor.hidden = false; desarmar($('btnVisorBorrar'));
+  $('visorInfo').textContent = 'Foto ' + f.id + ' · ' + f.w + ' × ' + f.h + ' px · ' + peso(f.size);
+  $('visorPos').textContent = (i + 1) + ' de ' + fotos.length;
+  $('btnVisorPrev').disabled = i === 0; $('btnVisorNext').disabled = i === fotos.length - 1;
+  visorImg.src = f.thumb;
+  const b = await almacen.blob(id).catch(() => null);
+  if (visorId !== id || !b) return;
+  if (visorUrl) URL.revokeObjectURL(visorUrl);
+  visorUrl = URL.createObjectURL(b); visorImg.src = visorUrl;
+}
+function cerrarVisor() {
+  visor.hidden = true; visorId = null; visorImg.removeAttribute('src');
+  if (visorUrl) { URL.revokeObjectURL(visorUrl); visorUrl = ''; }
+}
+function pasoVisor(d) { const i = fotos.findIndex(f => f.id === visorId) + d; if (fotos[i]) abrirVisor(fotos[i].id); }
+
+async function borrarFoto(id) {
+  const i = fotos.findIndex(f => f.id === id);
+  if (i < 0) return;
+  fotos.splice(i, 1);
+  const nodo = rejilla.querySelector('[data-id="' + id + '"]'); if (nodo) nodo.remove();
+  await almacen.remove(id);
+  pintarCuenta();
+  if (visorId === id) { const vecina = fotos[i] || fotos[i - 1]; if (vecina) abrirVisor(vecina.id); else cerrarVisor(); }
+}
+async function borrarTodo() {
+  fotos = []; sigId = 1; volatil = false; rejilla.textContent = '';
+  await almacen.clear();
+  pintarCuenta();
+}
+
+// Borrar pide un segundo toque: evita perder fotos por un toque accidental.
+function desarmar(b) { if (!b.dataset.txt) return; clearTimeout(b._t); b.textContent = b.dataset.txt; delete b.dataset.txt; b.classList.remove('armado'); }
+function conConfirmacion(b, pregunta, accion) {
+  b.addEventListener('click', () => {
+    if (b.dataset.txt) { desarmar(b); accion(); return; }
+    b.dataset.txt = b.textContent; b.textContent = pregunta(); b.classList.add('armado');
+    b._t = setTimeout(() => desarmar(b), 3500);
+  });
+}
+
+/* ════════ Exportar ════════ */
+const puedeCompartir = tipo => {
+  try { return !!(navigator.canShare && navigator.canShare({ files: [new File([new Uint8Array(1)], tipo === 'zip' ? 'a.zip' : 'a.jpg', { type: tipo === 'zip' ? 'application/zip' : 'image/jpeg' })] })); }
+  catch (e) { return false; }
+};
+let urlsExp = [];
+function nombreZip(i, n) {
+  const d = new Date(), p = v => String(v).padStart(2, '0');
+  return 'cartas-' + d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + (n > 1 ? '-parte' + (i + 1) : '') + '.zip';
+}
+function boton(texto, clase) { const b = document.createElement('button'); b.type = 'button'; b.className = 'btn' + (clase ? ' ' + clase : ''); b.textContent = texto; return b; }
+
+async function prepararZip(fila, parte, nombre) {
+  fila.textContent = 'Preparando el archivo…';
+  try {
+    const entradas = [];
+    for (const f of parte) {
+      const b = await almacen.blob(f.id);
+      if (b) entradas.push({ name: nombreArchivo(f), data: b, size: b.size, crc: f.crc, ts: f.ts });
+    }
+    if (!entradas.length) throw new Error('vacio');
+    const zip = makeZip(entradas), url = URL.createObjectURL(zip);
+    urlsExp.push(url);
+    fila.textContent = '';
+    const a = document.createElement('a');
+    a.className = 'btn primario'; a.href = url; a.download = nombre;
+    a.textContent = 'Descargar ' + nombre + ' · ' + nFotos(entradas.length) + ' · ' + peso(zip.size);
+    fila.append(a);
+    if (puedeCompartir('zip')) {
+      const c = boton('Compartir el ZIP');
+      c.addEventListener('click', () => { navigator.share({ files: [new File([zip], nombre, { type: 'application/zip' })] }).catch(() => {}); });
+      fila.append(c);
+    }
+  } catch (e) { fila.textContent = 'No se pudo preparar el archivo. Cierra otras pestañas y vuelve a intentarlo.'; }
+}
+
+async function compartirLote(b, lote, texto) {
+  const lanzar = async () => {
+    try { await navigator.share({ files: b._archivos }); }
+    catch (e) { if (e && e.name === 'NotAllowedError') b.textContent = 'Listo. Toca otra vez para abrir el menú de compartir'; }
+  };
+  if (b._archivos) { b.textContent = texto; return lanzar(); }
+  b.disabled = true; b.textContent = 'Preparando…';
+  const archivos = [];
+  for (const f of lote) {
+    const blob = await almacen.blob(f.id).catch(() => null);
+    if (blob) archivos.push(new File([blob], nombreArchivo(f), { type: 'image/jpeg', lastModified: f.ts }));
+  }
+  b._archivos = archivos; b.disabled = false; b.textContent = texto;
+  return lanzar();
+}
+
+function abrirExportar() {
+  if (!fotos.length) return;
+  cerrarExportar();
+  hojaExportar.hidden = false;
+  const zona = $('expZip'), partes = partir(fotos, MAX_ZIP);
+  partes.forEach((parte, i) => {
+    const fila = document.createElement('div'); fila.className = 'exp-fila'; zona.append(fila);
+    const nombre = nombreZip(i, partes.length);
+    if (partes.length === 1) return prepararZip(fila, parte, nombre);
+    const b = boton('Preparar parte ' + (i + 1) + ' · fotos ' + parte[0].id + ' a ' + parte[parte.length - 1].id + ' · ' + peso(parte.reduce((s, f) => s + f.size, 0)));
+    b.addEventListener('click', () => prepararZip(fila, parte, nombre));
+    fila.append(b);
+  });
+  const compartir = puedeCompartir('jpg');
+  $('expCompartir').hidden = !compartir;
+  if (!compartir) return;
+  for (let i = 0; i < fotos.length; i += LOTE) {
+    const lote = fotos.slice(i, i + LOTE);
+    const texto = fotos.length <= LOTE ? (lote.length === 1 ? 'Guardar o compartir la foto' : 'Guardar o compartir las ' + lote.length + ' fotos')
+                                       : 'Fotos ' + lote[0].id + ' a ' + lote[lote.length - 1].id;
+    const b = boton(texto);
+    b.addEventListener('click', () => compartirLote(b, lote, texto));
+    $('expLotes').append(b);
+  }
+}
+function cerrarExportar() {
+  hojaExportar.hidden = true;
+  urlsExp.forEach(u => URL.revokeObjectURL(u)); urlsExp = [];
+  $('expZip').textContent = ''; $('expLotes').textContent = '';
+}
+
+/* ════════ Demostración sin cámara ════════ */
+function crearDemo() {
+  const c = document.createElement('canvas'); c.width = 720; c.height = 960;
+  const g = c.getContext('2d'), pila = [];
+  let anim = null, n = 0, eventos = 0, proximo = performance.now() + 1400;
+  const rr = (x, y, w, h, r) => { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); };
+  function carta(k, y, rot) {
+    g.save(); g.translate(k.x, y); g.rotate(rot);
+    rr(-190, -266, 380, 532, 22); g.fillStyle = '#f4f1e8'; g.fill();
+    const grad = g.createLinearGradient(0, -240, 0, 240);
+    grad.addColorStop(0, 'hsl(' + k.tono + ',58%,46%)'); grad.addColorStop(1, 'hsl(' + ((k.tono + 45) % 360) + ',62%,26%)');
+    rr(-170, -246, 340, 492, 12); g.fillStyle = grad; g.fill();
+    g.fillStyle = 'rgba(255,255,255,.92)'; rr(-150, -228, 300, 50, 8); g.fill();
+    g.fillStyle = '#1b1b1b'; g.font = '700 30px system-ui, sans-serif'; g.textBaseline = 'middle'; g.fillText('Carta ' + k.n, -136, -202);
+    g.fillStyle = 'hsl(' + ((k.tono + 180) % 360) + ',70%,62%)';
+    g.beginPath();
+    if (k.n % 3 === 0) g.arc(0, -40, 96, 0, Math.PI * 2);
+    else if (k.n % 3 === 1) { g.moveTo(0, -140); g.lineTo(104, 44); g.lineTo(-104, 44); }
+    else { g.moveTo(0, -146); g.lineTo(92, -40); g.lineTo(0, 66); g.lineTo(-92, -40); }
+    g.fill();
+    g.fillStyle = 'rgba(255,255,255,.86)'; rr(-150, 96, 300, 132, 8); g.fill();
+    g.fillStyle = '#5a5a5a'; for (let i = 0; i < 4; i++) g.fillRect(-134, 116 + i * 26, 268 - ((k.n * 37 + i * 53) % 110), 9);
+    g.restore();
+  }
+  function cuadro() {
+    const now = performance.now();
+    g.fillStyle = '#24312c'; g.fillRect(0, 0, 720, 960);
+    g.strokeStyle = '#141c19'; g.lineWidth = 40; g.strokeRect(20, 20, 680, 920);
+    for (const k of pila.slice(-3)) carta(k, k.y, k.rot);
+    if (!anim && now >= proximo) {
+      eventos++;
+      anim = eventos % 4 === 0 ? { mano: true, t: now }
+        : { t: now, k: { n: ++n, tono: (n * 67) % 360, x: 360 + (Math.random() - 0.5) * 44, y: 480 + (Math.random() - 0.5) * 44, rot: (Math.random() - 0.5) * 0.14 } };
+    }
+    if (anim) {
+      const p = Math.min(1, (now - anim.t) / (anim.mano ? 750 : 430));
+      if (anim.mano) {
+        g.fillStyle = '#c9966f'; g.beginPath(); g.ellipse(-240 + 1200 * p, 520, 210, 120, 0.25, 0, Math.PI * 2); g.fill();
+        if (p >= 1) { anim = null; proximo = now + 1800; }
+      } else {
+        const e = 1 - Math.pow(1 - p, 3);
+        carta(anim.k, -320 + (anim.k.y + 320) * e, anim.k.rot + (1 - e) * 0.5);
+        if (p >= 1) { pila.push(anim.k); anim = null; proximo = now + 2000; }
+      }
+    }
+    for (let i = 0; i < 240; i++) {   // ruido como el de un sensor real
+      const v = Math.random() < 0.5 ? 0 : 255;
+      g.fillStyle = 'rgba(' + v + ',' + v + ',' + v + ',.07)'; g.fillRect(Math.random() * 720, Math.random() * 960, 2, 2);
+    }
+  }
+  cuadro();
+  const reloj = setInterval(cuadro, 33), s = c.captureStream(30);
+  return { stream: s, stop() { clearInterval(reloj); s.getTracks().forEach(t => t.stop()); } };
+}
+
+/* ════════ Controles ════════ */
+$('btnActivar').addEventListener('click', async () => {
+  const b = $('btnActivar');
+  activarAudio(); b.disabled = true;
+  await abrirCamara();
+  b.disabled = false;
+});
+$('btnDemo').addEventListener('click', async () => {
+  activarAudio(); cerrarStream(); $('introError').hidden = true;
+  const d = crearDemo();
+  await conectar(d.stream, d);
+  iniciar();
+});
+$('btnSalirDemo').addEventListener('click', alInicio);
+$('btnMain').addEventListener('click', () => {
+  activarAudio();
+  if (!stream) return abrirCamara();
+  if (escaneando) pausar(); else iniciar();
+});
+$('btnManual').addEventListener('click', () => {
+  activarAudio();
+  if (!stream) return;
+  capturar('manual');
+  if (escaneando) { retenido = 'captura'; retenidoHasta = performance.now() + 900; }
+});
+
+$('btnFotos').addEventListener('click', () => { hojaFotos.hidden = false; });
+$('btnCerrarFotos').addEventListener('click', () => { hojaFotos.hidden = true; desarmar($('btnBorrarTodo')); });
+$('btnExportar').addEventListener('click', abrirExportar);
+$('btnCerrarExportar').addEventListener('click', cerrarExportar);
+conConfirmacion($('btnBorrarTodo'), () => '¿Borrar ' + (fotos.length === 1 ? 'la foto' : 'las ' + fotos.length + ' fotos') + '? Toca otra vez', borrarTodo);
+$('btnVisorCerrar').addEventListener('click', cerrarVisor);
+$('btnVisorPrev').addEventListener('click', () => pasoVisor(-1));
+$('btnVisorNext').addEventListener('click', () => pasoVisor(1));
+conConfirmacion($('btnVisorBorrar'), () => '¿Borrar? Toca otra vez', () => borrarFoto(visorId));
+
+$('btnAjustes').addEventListener('click', () => { hojaAjustes.hidden = false; });
+$('btnCerrarAjustes').addEventListener('click', () => { hojaAjustes.hidden = true; });
+function pintarAjustes() {
+  $('inSens').value = cfg.sens; $('outSens').textContent = cfg.sens + ' de 10';
+  $('inEspera').value = cfg.stableMs; $('outEspera').textContent = nf1fijo.format(cfg.stableMs / 1000) + ' s';
+  $('inDedupe').checked = cfg.dedupe; $('inSonido').checked = cfg.sound;
+  $('inCalidad').value = cfg.quality; $('outCalidad').textContent = cfg.quality + ' %';
+  $('selRes').value = cfg.res;
+  pintarUmbral();
+}
+$('inSens').addEventListener('input', e => { cfg.sens = +e.target.value; guardarAjustes(); pintarAjustes(); });
+$('inEspera').addEventListener('input', e => { cfg.stableMs = +e.target.value; guardarAjustes(); pintarAjustes(); });
+$('inDedupe').addEventListener('change', e => { cfg.dedupe = e.target.checked; guardarAjustes(); });
+$('inSonido').addEventListener('change', e => { cfg.sound = e.target.checked; guardarAjustes(); if (cfg.sound) { activarAudio(); pitido(); } });
+$('inCalidad').addEventListener('input', e => { cfg.quality = +e.target.value; guardarAjustes(); pintarAjustes(); });
+$('selRes').addEventListener('change', e => { cfg.res = e.target.value; guardarAjustes(); if (stream && !demo) reabrir(); });
+$('selCam').addEventListener('change', e => { cfg.deviceId = e.target.value; guardarAjustes(); if (stream && !demo) reabrir(); });
+$('inZoom').addEventListener('input', e => { $('outZoom').textContent = nf1.format(+e.target.value) + '×'; restringir({ zoom: +e.target.value }); detector.reset(); });
+$('inLuz').addEventListener('change', e => { restringir({ torch: e.target.checked }); detector.reset(); });
+$('btnRoiReset').addEventListener('click', () => { cfg.roi = Object.assign({}, ROI_BASE); guardarAjustes(); pintarRoi(); detector.reset(); hojaAjustes.hidden = true; });
+
+document.addEventListener('gesturestart', e => e.preventDefault());   // sin zoom de pellizco accidental en iOS
+
+/* ════════ Arranque ════════ */
+pintarAjustes(); pintarRoi(); pintarCuenta();
+$('btnDemo').hidden = !HTMLCanvasElement.prototype.captureStream;
+almacenListo = almacen.init().then(guardadas => {
+  if (!guardadas.length) return;
+  fotos = guardadas;
+  sigId = fotos.reduce((m, f) => Math.max(m, f.id), 0) + 1;
+  fotos.forEach(pintarMini);
+  pintarCuenta();
+});
+})();
+</script>
+</body>
+</html>
