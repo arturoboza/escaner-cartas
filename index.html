@@ -400,7 +400,8 @@ select {
       <div class="fila">
         <label for="selRes">Resolución</label>
         <select id="selRes">
-          <option value="max">Máxima del equipo (hasta 4K)</option>
+          <option value="foto">Máxima: formato foto 4:3 (hasta 12 MP)</option>
+          <option value="max">4K (3840 × 2160)</option>
           <option value="fhd">Full HD (1920 × 1080)</option>
           <option value="hd">HD (1280 × 720)</option>
         </select>
@@ -450,6 +451,7 @@ select {
     <div class="exp">
       <h3>Archivo ZIP</h3>
       <p>Todas las fotos en un archivo. En iPhone y iPad queda en la app Archivos, carpeta Descargas.</p>
+      <p id="expNota" hidden></p>
       <div class="exp-lista" id="expZip"></div>
     </div>
     <div class="exp" id="expCompartir" hidden>
@@ -633,7 +635,7 @@ function createDetector(cfg) {
 const CLAVE = 'escaner-cartas.ajustes';
 const ROI_BASE = { x: 0.08, y: 0.08, w: 0.84, h: 0.84 };
 const BASE = { sens: 5, stableMs: 600, dedupe: true, sound: true, quality: 90, res: 'fhd', deviceId: '' };
-const RES = { max: [3840, 2160], fhd: [1920, 1080], hd: [1280, 720] };
+const RES = { foto: [4032, 3024], max: [3840, 2160], fhd: [1920, 1080], hd: [1280, 720] };
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
 function cargarAjustes() {
@@ -713,7 +715,7 @@ const hojaFotos = $('hojaFotos'), hojaAjustes = $('hojaAjustes'), hojaExportar =
 const rejilla = $('rejilla'), icoFotos = $('icoFotos'), visorImg = $('visorImg');
 
 const TICK_MS = 80, AN = 256, BOX = 4, MINI = 240;
-const MAX_ZIP = 200 * 1024 * 1024, LOTE = 30;
+const MAX_ZIP = 150 * 1024 * 1024, LOTE = 30, LOTE_BYTES = 60 * 1024 * 1024;
 const ESTADOS = {
   apagada: 'Cámara apagada', pausa: 'En pausa', quieto: 'Esperando carta', movimiento: 'Movimiento…',
   ajustando: 'Ajustando imagen…', captura: 'Foto guardada', 'sin-cambio': 'Sin cambios, no se guardó'
@@ -726,7 +728,7 @@ let stream = null, pista = null, demo = null;
 let escaneando = false, ocupado = false, reloj = null, wakeLock = null, audio = null;
 let retenido = '', retenidoHasta = 0, ultimoCambio = null;
 let almacenListo = Promise.resolve();
-const cola = [], MAX_COLA = 4;      // fotos tomadas que esperan su turno para guardarse
+const cola = [], MAX_COLA = 4, MAX_COLA_BYTES = 120 * 1024 * 1024;   // fotos tomadas que esperan su turno para guardarse
 const lienzoAn = document.createElement('canvas'), ctxAn = lienzoAn.getContext('2d', { willReadFrequently: true });
 const lienzoMini = document.createElement('canvas'), ctxMini = lienzoMini.getContext('2d');
 let luma = null, celdasBuf = null;
@@ -835,10 +837,20 @@ async function reabrir() {
 }
 function alCortarse() { if (!document.hidden) reabrir(); }
 
+// Dice qué entrega la cámara y de qué tamaño queda cada foto con el marco actual.
+function pintarResInfo() {
+  const p = $('resInfo'), vw = video.videoWidth, vh = video.videoHeight;
+  if (!stream || demo || !vw) { p.textContent = ''; return; }
+  const r = roiPx(), pedido = RES[cfg.res];
+  let t = 'La cámara entrega ' + vw + ' × ' + vh + ' px (' + nf1.format(vw * vh / 1e6) + ' MP).';
+  if (vw * vh < pedido[0] * pedido[1] * 0.6) t += ' Es lo máximo que esta cámara le da a una página web.';
+  p.textContent = t + ' Con el marco actual, cada foto queda de ' + r.w + ' × ' + r.h + ' px. Para más detalle, acerca el equipo hasta que la carta llene el marco.';
+}
+
 async function refrescarCamara() {
   const real = !!stream && !demo;
   $('grupoCam').hidden = !!demo;
-  $('resInfo').textContent = real && video.videoWidth ? 'La cámara entrega ' + video.videoWidth + ' × ' + video.videoHeight + ' px.' : '';
+  pintarResInfo();
   const filaCam = $('filaCam'), sel = $('selCam'), filaZoom = $('filaZoom'), filaLuz = $('filaLuz');
   filaCam.hidden = filaZoom.hidden = filaLuz.hidden = true;
   if (!real) return;
@@ -908,7 +920,7 @@ roiEl.addEventListener('pointermove', e => {
   }
   cfg.roi = { x, y, w, h }; pintarRoi();
 });
-const soltar = () => { if (!arrastre) return; arrastre = null; guardarAjustes(); detector.reset(); };
+const soltar = () => { if (!arrastre) return; arrastre = null; guardarAjustes(); detector.reset(); pintarResInfo(); };
 roiEl.addEventListener('pointerup', soltar); roiEl.addEventListener('pointercancel', soltar);
 
 /* ════════ Análisis de cada cuadro ════════ */
@@ -928,9 +940,11 @@ function leerCuadro() {
   return { cells: celdas(luma, aw, ah, BOX, celdasBuf), nit: nitidez(luma, aw, ah) };
 }
 
+let saltarHasta = 0;
 function tick() {
   if (!escaneando || document.hidden || video.readyState < 2 || !video.videoWidth) return;
   const now = performance.now();
+  if (now < saltarHasta) return;
   let c;
   try { c = leerCuadro(); } catch (e) { return; }
   const r = detector.update(c.cells, c.nit, now);
@@ -945,6 +959,9 @@ function tick() {
     $('diag').textContent = 'Movimiento ' + nf1fijo.format(r.motion * 100) + ' % (dispara con ' + nf1fijo.format(u.motionHi * 100) +
       ' %) · Último cambio ' + (ultimoCambio === null ? 'sin datos' : nf1fijo.format(ultimoCambio * 100) + ' %') + ' (guarda con ' + nf1fijo.format(u.minChange * 100) + ' %)';
   }
+  // Con imágenes muy grandes analizar cada cuadro cuesta más: se espacia para no trabar la vista previa.
+  const costo = performance.now() - now;
+  saltarHasta = costo > 20 ? now + costo * 4 : 0;
 }
 
 function pintarUmbral() { medUmbral.style.left = (Math.sqrt(umbrales(cfg.sens).motionHi / 0.3) * 100).toFixed(1) + '%'; }
@@ -974,8 +991,11 @@ function pitido() {
 // así no se pierde una carta si la anterior todavía se está guardando.
 function capturar(tipo) {
   if (!stream || !video.videoWidth) return;
-  if (cola.length >= MAX_COLA) { aviso('El equipo no alcanza a guardar tan rápido. Espera un momento antes de la próxima carta.'); return; }
   const vw = video.videoWidth, vh = video.videoHeight, r = roiPx();
+  const enEspera = cola.reduce((s, it) => s + it.c.width * it.c.height * 4, 0);
+  if (cola.length >= MAX_COLA || (cola.length && enEspera + r.w * r.h * 4 > MAX_COLA_BYTES)) {
+    aviso('El equipo no alcanza a guardar tan rápido. Espera un momento antes de la próxima carta.'); return;
+  }
   const c = document.createElement('canvas');
   c.width = r.w; c.height = r.h;
   c.getContext('2d').drawImage(video, -r.x, -r.y, vw, vh);
@@ -999,7 +1019,10 @@ async function procesarCola() {
       const buf = await (blob.arrayBuffer ? blob.arrayBuffer() : new Response(blob).arrayBuffer());
       await almacenListo;            // la numeración sigue a las fotos ya guardadas
       const meta = { id: sigId++, ts: it.ts, w: c.width, h: c.height, size: blob.size, crc: crc32(new Uint8Array(buf)), thumb, auto: it.auto };
-      if (!(await almacen.add(meta, buf, blob))) volatil = true;
+      if (!(await almacen.add(meta, buf, blob))) {
+        if (!volatil) aviso('El navegador no dejó guardar esta foto en el equipo; quedó solo en memoria. Exporta las fotos antes de cerrar la página.');
+        volatil = true;
+      }
       fotos.push(meta); pintarMini(meta);
     } catch (e) {
       aviso('No se pudo guardar una foto. Vuelve a intentarlo.');
@@ -1105,24 +1128,39 @@ const puedeCompartir = tipo => {
   try { return !!(navigator.canShare && navigator.canShare({ files: [new File([new Uint8Array(1)], tipo === 'zip' ? 'a.zip' : 'a.jpg', { type: tipo === 'zip' ? 'application/zip' : 'image/jpeg' })] })); }
   catch (e) { return false; }
 };
-let urlsExp = [];
+let urlsExp = [], zipListo = null, loteListo = null, genExp = 0;
 function nombreZip(i, n) {
   const d = new Date(), p = v => String(v).padStart(2, '0');
   return 'cartas-' + d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + (n > 1 ? '-parte' + (i + 1) : '') + '.zip';
 }
 function boton(texto, clase) { const b = document.createElement('button'); b.type = 'button'; b.className = 'btn' + (clase ? ' ' + clase : ''); b.textContent = texto; return b; }
 
-async function prepararZip(fila, parte, nombre) {
+// Fila de una parte todavía sin armar. Solo se mantiene un ZIP armado a la vez, para no llenar la memoria del equipo.
+function filaPendiente(fila, parte, nombre, i) {
+  fila.textContent = '';
+  const b = boton('Preparar parte ' + (i + 1) + ' · fotos ' + parte[0].id + ' a ' + parte[parte.length - 1].id + ' · ' + peso(parte.reduce((s, f) => s + f.size, 0)));
+  b.addEventListener('click', () => prepararZip(fila, parte, nombre, () => filaPendiente(fila, parte, nombre, i)));
+  fila.append(b);
+}
+
+async function prepararZip(fila, parte, nombre, restaurar) {
+  if (zipListo && zipListo.fila !== fila) {
+    URL.revokeObjectURL(zipListo.url); urlsExp = urlsExp.filter(u => u !== zipListo.url);
+    if (zipListo.restaurar) zipListo.restaurar();
+    zipListo = null;
+  }
+  const gen = genExp;
   fila.textContent = 'Preparando el archivo…';
   try {
     const entradas = [];
     for (const f of parte) {
       const b = await almacen.blob(f.id);
+      if (gen !== genExp) return;
       if (b) entradas.push({ name: nombreArchivo(f), data: b, size: b.size, crc: f.crc, ts: f.ts });
     }
     if (!entradas.length) throw new Error('vacio');
     const zip = makeZip(entradas), url = URL.createObjectURL(zip);
-    urlsExp.push(url);
+    urlsExp.push(url); zipListo = { fila, url, restaurar };
     fila.textContent = '';
     const a = document.createElement('a');
     a.className = 'btn primario'; a.href = url; a.download = nombre;
@@ -1133,7 +1171,13 @@ async function prepararZip(fila, parte, nombre) {
       c.addEventListener('click', () => { navigator.share({ files: [new File([zip], nombre, { type: 'application/zip' })] }).catch(() => {}); });
       fila.append(c);
     }
-  } catch (e) { fila.textContent = 'No se pudo preparar el archivo. Cierra otras pestañas y vuelve a intentarlo.'; }
+  } catch (e) {
+    if (gen !== genExp) return;
+    fila.textContent = 'No se pudo preparar el archivo. Cierra otras pestañas y vuelve a intentarlo. ';
+    const r = boton('Reintentar');
+    r.addEventListener('click', () => prepararZip(fila, parte, nombre, restaurar));
+    fila.append(r);
+  }
 }
 
 async function compartirLote(b, lote, texto) {
@@ -1142,10 +1186,13 @@ async function compartirLote(b, lote, texto) {
     catch (e) { if (e && e.name === 'NotAllowedError') b.textContent = 'Listo. Toca otra vez para abrir el menú de compartir'; }
   };
   if (b._archivos) { b.textContent = texto; return lanzar(); }
+  if (loteListo && loteListo !== b) loteListo._archivos = null;      // un solo lote en memoria a la vez
+  loteListo = b;
+  const gen = genExp, archivos = [];
   b.disabled = true; b.textContent = 'Preparando…';
-  const archivos = [];
   for (const f of lote) {
     const blob = await almacen.blob(f.id).catch(() => null);
+    if (gen !== genExp) return;
     if (blob) archivos.push(new File([blob], nombreArchivo(f), { type: 'image/jpeg', lastModified: f.ts }));
   }
   b._archivos = archivos; b.disabled = false; b.textContent = texto;
@@ -1157,29 +1204,30 @@ function abrirExportar() {
   cerrarExportar();
   hojaExportar.hidden = false;
   const zona = $('expZip'), partes = partir(fotos, MAX_ZIP);
+  $('expNota').hidden = partes.length === 1;
+  $('expNota').textContent = 'Por el peso de las fotos, el ZIP va en ' + partes.length + ' partes. Descarga cada una antes de preparar la siguiente.';
   partes.forEach((parte, i) => {
     const fila = document.createElement('div'); fila.className = 'exp-fila'; zona.append(fila);
     const nombre = nombreZip(i, partes.length);
-    if (partes.length === 1) return prepararZip(fila, parte, nombre);
-    const b = boton('Preparar parte ' + (i + 1) + ' · fotos ' + parte[0].id + ' a ' + parte[parte.length - 1].id + ' · ' + peso(parte.reduce((s, f) => s + f.size, 0)));
-    b.addEventListener('click', () => prepararZip(fila, parte, nombre));
-    fila.append(b);
+    if (partes.length === 1) prepararZip(fila, parte, nombre, null); else filaPendiente(fila, parte, nombre, i);
   });
   const compartir = puedeCompartir('jpg');
   $('expCompartir').hidden = !compartir;
   if (!compartir) return;
-  for (let i = 0; i < fotos.length; i += LOTE) {
-    const lote = fotos.slice(i, i + LOTE);
-    const texto = fotos.length <= LOTE ? (lote.length === 1 ? 'Guardar o compartir la foto' : 'Guardar o compartir las ' + lote.length + ' fotos')
-                                       : 'Fotos ' + lote[0].id + ' a ' + lote[lote.length - 1].id;
+  const lotes = [];                 // lotes de hasta 30 fotos o 60 MB: el menú de compartir no aguanta mucho más
+  for (const parte of partir(fotos, LOTE_BYTES)) for (let i = 0; i < parte.length; i += LOTE) lotes.push(parte.slice(i, i + LOTE));
+  for (const lote of lotes) {
+    const texto = lotes.length === 1 ? (lote.length === 1 ? 'Guardar o compartir la foto' : 'Guardar o compartir las ' + lote.length + ' fotos')
+                : (lote.length === 1 ? 'Foto ' + lote[0].id : 'Fotos ' + lote[0].id + ' a ' + lote[lote.length - 1].id);
     const b = boton(texto);
     b.addEventListener('click', () => compartirLote(b, lote, texto));
     $('expLotes').append(b);
   }
 }
 function cerrarExportar() {
+  genExp++;
   hojaExportar.hidden = true;
-  urlsExp.forEach(u => URL.revokeObjectURL(u)); urlsExp = [];
+  urlsExp.forEach(u => URL.revokeObjectURL(u)); urlsExp = []; zipListo = null; loteListo = null;
   $('expZip').textContent = ''; $('expLotes').textContent = '';
 }
 
@@ -1293,7 +1341,7 @@ $('selRes').addEventListener('change', e => { cfg.res = e.target.value; guardarA
 $('selCam').addEventListener('change', e => { cfg.deviceId = e.target.value; guardarAjustes(); if (stream && !demo) reabrir(); });
 $('inZoom').addEventListener('input', e => { $('outZoom').textContent = nf1.format(+e.target.value) + '×'; restringir({ zoom: +e.target.value }); detector.reset(); });
 $('inLuz').addEventListener('change', e => { restringir({ torch: e.target.checked }); detector.reset(); });
-$('btnRoiReset').addEventListener('click', () => { cfg.roi = Object.assign({}, ROI_BASE); guardarAjustes(); pintarRoi(); detector.reset(); hojaAjustes.hidden = true; });
+$('btnRoiReset').addEventListener('click', () => { cfg.roi = Object.assign({}, ROI_BASE); guardarAjustes(); pintarRoi(); detector.reset(); pintarResInfo(); hojaAjustes.hidden = true; });
 
 document.addEventListener('gesturestart', e => e.preventDefault());   // sin zoom de pellizco accidental en iOS
 
