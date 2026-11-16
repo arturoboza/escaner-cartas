@@ -1,33 +1,41 @@
 # Escáner de cartas
 
-App web para iPhone y iPad que saca una foto sola cada vez que cae una carta nueva en una caja, y la guarda recortada y derecha.
+App web para iPhone y iPad que saca fotos solas de tus cartas y guarda cada carta recortada y derecha. Puedes tirarlas de a una en una caja, poner varias a la vez en una mesa o ir dando vuelta las páginas de una carpeta.
 
 **Abrir la app:** https://arturoboza.github.io/escaner-cartas/
 
 ## Cómo se usa
 
-1. Fija el equipo sobre la caja, con la cámara trasera mirando hacia abajo y luz pareja.
+1. Fija el equipo sobre la caja, la mesa o la carpeta, con la cámara trasera mirando hacia abajo y luz pareja.
 2. Abre el enlace en Safari y permite el uso de la cámara.
-3. Arrastra las esquinas del marco amarillo hasta cubrir la zona donde caen las cartas.
-4. Con la caja vacía, toca **Iniciar** y tira las cartas de a una. La foto sale cuando la carta queda quieta.
+3. Arrastra las esquinas del marco amarillo hasta cubrir la zona donde caen o pones las cartas (con una carpeta, la página).
+4. Toca **Iniciar**. Con la caja o la mesa, empieza con ellas vacías. La foto sale cuando las cartas quedan quietas.
 5. En **Fotos** puedes revisarlas, borrarlas y exportarlas en un ZIP o guardarlas en la app Fotos.
 
 Para tenerla como app: en Safari, toca Compartir y luego "Añadir a pantalla de inicio".
 
-## Recorte automático
+## Modos
 
-Cada foto se guarda solo con la carta, enderezada. Si la app no distingue bien la carta, guarda la foto completa y la marca "sin recorte" en la galería, así no se pierde ninguna.
+En **Ajustes**, en **Qué guarda cada foto**, puedes elegir:
 
-Para que recorte mejor:
+- **Una carta, recortada y derecha.** Tiras las cartas de a una en una caja y cada foto guarda solo la carta nueva.
+- **Varias cartas, cada una por separado.** Pones varias cartas en una mesa, una al lado de la otra, y cada carta se guarda como una foto aparte, en orden de lectura (por filas, de izquierda a derecha). Puedes ponerlas de a una o en tandas. Las que siguen en su lugar no se vuelven a guardar. El botón **Manual** guarda todas las que ve en ese momento.
+- **Página de carpeta con bolsillos.** Eliges cuántas columnas y filas tiene la página (9, 12 o 16 bolsillos, o 4) y vas dando vuelta las páginas. Cada carta se guarda aparte, en orden de lectura. Si el borde de una carta no se distingue (por ejemplo, borde negro sobre página negra), se recorta el lugar de su bolsillo con un margen y la foto queda marcada "aproximada". Si la misma página sale dos veces, no se repite.
+- **La foto completa, sin recortar.** Guarda la zona del marco amarillo tal como se ve.
 
-- Empieza con la caja vacía. La app la mira al tocar **Iniciar** y después reconoce lo que cambió.
+Si la app no distingue bien una carta, guarda la foto completa y la marca "sin recorte" en la galería, así no se pierde ninguna.
+
+## Para que recorte mejor
+
+- Con la caja o la mesa, empieza con ellas vacías. La app las mira al tocar **Iniciar** y después reconoce lo que cambió.
 - Usa un fondo que contraste con el borde de las cartas: oscuro para bordes claros, claro para bordes oscuros.
-- Deja el equipo paralelo al fondo de la caja, sin inclinarlo.
-- Usa cartas del mismo tamaño en cada tanda. La app aprende el tamaño con las primeras.
+- Usa luz pareja, sin sombras marcadas ni reflejos en los plásticos.
+- Deja el equipo paralelo a la caja, la mesa o la página, sin inclinarlo.
+- Con una carpeta, saca una página por foto y haz que la página llene el marco.
+- Usa cartas del mismo tamaño en cada tanda.
+- Con varias cartas sueltas, no las encimes y deja un poco de espacio entre ellas.
 
-El recorte puede fallar cuando el borde de la carta se confunde con el fondo o con la carta de abajo. Conviene revisar las miniaturas antes de exportar.
-
-Para guardar siempre la foto completa, apaga **Recortar y enderezar la carta** en Ajustes.
+El recorte puede fallar cuando el borde de la carta se confunde con el fondo, con la carta de abajo o con una carta vecina, o cuando la foto tiene mucho ángulo. Conviene revisar las miniaturas antes de exportar.
 
 ## Notas
 
