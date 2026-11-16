@@ -231,6 +231,11 @@ h1, h2, h3, p { margin: 0; }
   background: var(--velo); font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums;
 }
 
+.mini em {
+  position: absolute; left: 4px; right: 4px; top: 4px; padding: 2px 4px; border-radius: 6px; text-align: center;
+  background: var(--velo); color: var(--marco); font-size: 11px; font-weight: 700; font-style: normal;
+}
+
 .grupo { display: grid; gap: 16px; padding-bottom: 22px; }
 .grupo + .grupo { border-top: 1px solid var(--line); padding-top: 22px; }
 .grupo h3 { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
@@ -296,7 +301,7 @@ select {
       <ol>
         <li><span><b>Fija el equipo sobre la caja</b>Con la cámara trasera mirando hacia abajo y luz pareja, sin reflejos.</span></li>
         <li><span><b>Ajusta el marco amarillo</b>Arrastra las esquinas hasta cubrir la zona donde caen las cartas.</span></li>
-        <li><span><b>Toca Iniciar y tira las cartas de a una</b>La foto sale cuando la carta queda quieta.</span></li>
+        <li><span><b>Con la caja vacía, toca Iniciar</b>Tira las cartas de a una. La foto sale cuando la carta queda quieta, recortada y derecha.</span></li>
       </ol>
       <p class="error" id="introError" hidden></p>
       <div class="acciones">
@@ -312,7 +317,7 @@ select {
         <span class="esq" data-h="nw"></span><span class="esq" data-h="ne"></span><span class="esq" data-h="sw"></span><span class="esq" data-h="se"></span>
       </div>
       <div class="flash" id="flash"></div>
-      <p class="pista">Arrastra el marco hasta la zona donde caen las cartas y toca Iniciar.</p>
+      <p class="pista">Arrastra el marco hasta la zona donde caen las cartas. Con la caja vacía, toca Iniciar.</p>
       <div class="medidor" aria-hidden="true"><i id="medFill"></i><b id="medUmbral"></b></div>
     </div>
     <button class="chip" id="btnSalirDemo" type="button" hidden>Demostración · Salir</button>
@@ -418,6 +423,10 @@ select {
     </div>
     <div class="grupo">
       <h3>Foto</h3>
+      <label class="sw" for="inRecorte">
+        <span><b>Recortar y enderezar la carta</b><small>Guarda solo la carta, derecha. Si no la distingue bien, guarda la foto completa y la marca "sin recorte". Funciona mejor si empiezas con la caja vacía y el fondo contrasta con el borde de las cartas.</small></span>
+        <input type="checkbox" id="inRecorte">
+      </label>
       <div class="fila">
         <label for="inCalidad">Calidad JPEG <output id="outCalidad" for="inCalidad"></output></label>
         <input type="range" id="inCalidad" min="60" max="100" step="5">
@@ -629,12 +638,399 @@ function createDetector(cfg) {
     }
   };
 }
+/* ── Recorte automático: encontrar la carta en la foto y enderezarla ── */
+
+// Bordes en color sobre una imagen RGBA chica (tensor de estructura).
+// Devuelve la fuerza del borde y el ángulo de su normal, entre 0 y π.
+function bordes(rgba, w, h) {
+  const n = w * h, a = new Float32Array(n), t = new Float32Array(n);
+  const jxx = new Float32Array(n), jyy = new Float32Array(n), jxy = new Float32Array(n);
+  for (let c = 0; c < 3; c++) {
+    for (let i = 0, j = c; i < n; i++, j += 4) a[i] = rgba[j];
+    for (let y = 0; y < h; y++) {                       // suavizado 3 × 3: pasada horizontal
+      const o = y * w;
+      t[o] = (a[o] * 2 + a[o + 1]) / 3; t[o + w - 1] = (a[o + w - 1] * 2 + a[o + w - 2]) / 3;
+      for (let x = 1; x < w - 1; x++) t[o + x] = (a[o + x - 1] + a[o + x] + a[o + x + 1]) / 3;
+    }
+    for (let x = 0; x < w; x++) {                       // pasada vertical
+      a[x] = (t[x] * 2 + t[x + w]) / 3; a[(h - 1) * w + x] = (t[(h - 1) * w + x] * 2 + t[(h - 2) * w + x]) / 3;
+    }
+    for (let y = 1; y < h - 1; y++) { const o = y * w; for (let x = 0; x < w; x++) a[o + x] = (t[o + x - w] + t[o + x] + t[o + x + w]) / 3; }
+    for (let y = 1; y < h - 1; y++) for (let x = 1, p = y * w + 1; x < w - 1; x++, p++) {
+      const gx = (a[p - w + 1] + 2 * a[p + 1] + a[p + w + 1] - a[p - w - 1] - 2 * a[p - 1] - a[p + w - 1]) * 0.25;
+      const gy = (a[p + w - 1] + 2 * a[p + w] + a[p + w + 1] - a[p - w - 1] - 2 * a[p - w] - a[p - w + 1]) * 0.25;
+      jxx[p] += gx * gx; jyy[p] += gy * gy; jxy[p] += gx * gy;
+    }
+  }
+  const mag = new Float32Array(n), ang = new Float32Array(n);
+  for (let p = 0; p < n; p++) {
+    const d = jxx[p] - jyy[p], s = Math.sqrt(d * d + 4 * jxy[p] * jxy[p]);
+    mag[p] = Math.sqrt(0.5 * (jxx[p] + jyy[p] + s));
+    let th = 0.5 * Math.atan2(2 * jxy[p], d); if (th < 0) th += Math.PI;
+    ang[p] = th;
+  }
+  return { mag, ang };
+}
+
+// Umbral de borde: una fracción k del percentil 97 de la fuerza, con un piso.
+function umbralBorde(mag, k, piso) {
+  const hi = new Uint32Array(256);
+  for (let i = 0; i < mag.length; i++) hi[mag[i] > 255 ? 255 : mag[i] | 0]++;
+  let acc = 0, p = 255;
+  for (; p > 0; p--) { acc += hi[p]; if (acc >= mag.length * 0.03) break; }
+  return Math.max(piso, p * k);
+}
+
+function grisDe(rgba, n) {
+  const g = new Float32Array(n);
+  for (let i = 0, j = 0; i < n; i++, j += 4) g[i] = (rgba[j] * 77 + rgba[j + 1] * 150 + rgba[j + 2] * 29) / 256;
+  return g;
+}
+
+// Píxeles que cambiaron más de T niveles entre la imagen anterior (b) y esta (a).
+// Compensa la exposición con el cociente más repetido (el del fondo que sigue igual, aunque la carta nueva
+// tape más de media imagen) y sube T si hay mucho ruido.
+function listaCambio(a, b, T) {
+  const n = a.length, hi = new Uint32Array(300); let m = 0, g = 1;
+  for (let i = 0; i < n; i += 3) { if (b[i] < 12) continue; const r = a[i] / b[i]; if (r >= 0.5 && r < 2) { hi[((r - 0.5) * 200) | 0]++; m++; } }
+  if (m > 50) {                                          // ventana de ±3 % con más píxeles, entre 0,8 y 1,25
+    let mejor = -1, kb = 100, acc = 0;
+    for (let k = 54; k <= 156; k++) { acc += hi[k]; if (k >= 67) acc -= hi[k - 13]; if (k >= 66 && acc > mejor) { mejor = acc; kb = k - 6; } }
+    let s = 0, sw = 0;
+    for (let k = kb - 6; k <= kb + 6; k++) { s += hi[k] * (0.5 + (k + 0.5) / 200); sw += hi[k]; }
+    if (sw > 0.05 * m) g = s / sw;
+  }
+  let s2 = 0, c = 0;                                     // ruido: dispersión de las diferencias chicas
+  for (let i = 0; i < n; i += 3) { const d = a[i] - b[i] * g; if (d > -6 && d < 6) { s2 += d * d; c++; } }
+  if (c > 50) T = Math.max(T, 4.6 * Math.sqrt(s2 / c));
+  const out = [];
+  for (let p = 0; p < n; p++) { const d = a[p] - b[p] * g; if (d > T || d < -T) out.push(p); }
+  return out;
+}
+
+// Busca el rectángulo de la carta que acaba de caer (la de arriba de la pila).
+// o: { w, h, mag, ang, cambio?, vacia?, previo?, marco? }
+//   cambio: listaCambio() respecto de la imagen anterior (la caja al empezar o la foto previa)
+//   vacia: la imagen anterior era la caja al empezar, así que cambio dibuja la silueta de la carta
+//   previo: { corto, largo }, tamaño de carta ya aprendido, en píxeles de esta imagen
+//   marco: { corto, largo, ins }, marco interior ya aprendido y su distancia a cada lado (arriba, derecha, abajo, izquierda)
+// Devuelve null si no hay una carta clara, o
+//   { quad: [supIzq, supDer, infDer, infIzq], ancho, alto, apoyo, coincide, silueta, mayor, marco, porMarco }.
+// silueta: cuánto se aparta el rectángulo de la silueta (fracción del lado corto), o null si no se comparó.
+// mayor: tamaño de un contorno bien marcado y más grande que previo, si lo hay (señal de que previo quedó chico).
+// marco: el marco interior medido en esta carta · porMarco: el contorno se dedujo del marco (el borde no se distinguía).
+function buscarCarta(o) {
+  const w = o.w, h = o.h, mag = o.mag, ang = o.ang, n = w * h, PI = Math.PI, G = 180 / PI, B = 2;
+  const RMIN = o.razonMin || 0.62, RMAX = o.razonMax || 0.78;
+  if (o.cambio && o.cambio.length < 0.015 * n) return null;              // no cayó nada nuevo desde la imagen anterior
+  const cam = o.cambio && o.cambio.length <= 0.9 * n ? o.cambio : null;   // si cambió casi todo (luz, golpe al equipo), no sirve de guía
+  // Los lados de la carta nueva son bordes pegados a algo que cambió. Los bordes en zonas que siguen igual
+  // (paredes de la caja, cartas de abajo que asoman) no cuentan: así no se confunden con la carta de arriba.
+  let cerca = null;
+  if (cam) {
+    const a = new Uint8Array(n), t = new Uint8Array(n); cerca = new Uint8Array(n);
+    for (let k = 0; k < cam.length; k++) a[cam[k]] = 1;
+    for (let y = 0; y < h; y++) for (let x = 0, q = y * w; x < w; x++, q++) t[q] = a[q] | (x > 0 && a[q - 1]) | (x > 1 && a[q - 2]) | (x < w - 1 && a[q + 1]) | (x < w - 2 && a[q + 2]);
+    for (let y = 0; y < h; y++) for (let x = 0, q = y * w; x < w; x++, q++) cerca[q] = t[q] | (y > 0 && t[q - w]) | (y > 1 && t[q - 2 * w]) | (y < h - 1 && t[q + w]) | (y < h - 2 && t[q + 2 * w]);
+  }
+  const thr = umbralBorde(mag, 0.1, 6), px = [];
+  for (let p = 0; p < n; p++) if (mag[p] >= thr && (!cerca || cerca[p])) px.push(p);
+  if (px.length < 60) return null;
+
+  // Orientaciones presentes (módulo 90°: los cuatro lados de una carta caen en el mismo casillero).
+  const hist = new Float32Array(90), hs = new Float32Array(90), tope = 4 * thr, angulos = [];
+  for (let k = 0; k < px.length; k++) { const p = px[k]; hist[Math.min(89, Math.floor((ang[p] * G) % 90))] += mag[p] < tope ? mag[p] : tope; }
+  for (let i = 0; i < 90; i++) hs[i] = hist[(i + 88) % 90] + 2 * hist[(i + 89) % 90] + 3 * hist[i] + 2 * hist[(i + 1) % 90] + hist[(i + 2) % 90];
+  const afinar = (c, radio) => {                         // promedio de las orientaciones cercanas a c grados
+    let s = 0, sw = 0;
+    for (let k = 0; k < px.length; k++) {
+      const p = px[k]; let d = (ang[p] * G) % 90 - c;
+      if (d > 45) d -= 90; else if (d < -45) d += 90;
+      if (d >= -radio && d <= radio) { const g = mag[p] < tope ? mag[p] : tope; s += g * d; sw += g; }
+    }
+    return c + (sw ? s / sw : 0);
+  };
+  for (let t = 0, hm = 0; t < 2; t++) {
+    let b = -1, v = 0;
+    for (let i = 0; i < 90; i++) if (hs[i] > v) { v = hs[i]; b = i; }
+    if (b < 0 || (t && v < 0.6 * hm)) break;
+    if (!t) hm = v;
+    const c = afinar(afinar(b + 0.5, 4), 2);
+    for (const d of [0, -1, 1]) angulos.push((((c + d) % 90) + 90) % 90 * PI / 180);
+    for (let d = -4; d <= 4; d++) hs[(b + d + 90) % 90] = 0;
+  }
+
+  const cx = (w - 1) / 2, cy = (h - 1) / 2, R = Math.ceil(Math.hypot(w, h) / 2) + 4, N = 2 * R + 1;
+  const U = new Uint8Array(N * N), V = new Uint8Array(N * N), QU = new Float32Array(N), QV = new Float32Array(N), FU = new Float32Array(N), FV = new Float32Array(N);
+  const TOL = 10 * PI / 180, ladoMin = 0.18 * Math.min(w, h), cand = [];
+  // por cada recta candidata: cuánto de su largo tiene borde cerca (±B px)
+  const prefijos = (M, lineas) => lineas.map(i => {
+    const s = new Int32Array(N + 1);
+    for (let j = 0; j < N; j++) {
+      let m = 0;
+      for (let d = -B; d <= B && !m; d++) { const r = i + d; if (r >= 0 && r < N && M[r * N + j]) m = 1; }
+      s[j + 1] = s[j] + m;
+    }
+    return s;
+  });
+  // Rectas de un perfil: están donde la fuerza de borde F hace un pico; se quedan las 16 más largas (Q).
+  const lineas = (F, Q) => {
+    const c = [], S = i => F[i - 1] + 2 * F[i] + F[i + 1];
+    for (let i = 2; i < N - 2; i++) if (Q[i] >= ladoMin * 0.6 && S(i) > S(i - 1) && S(i) >= S(i + 1)) c.push(i);
+    c.sort((p, q) => Q[q] - Q[p]);
+    const out = [];
+    for (const i of c) { if (out.length >= 16) break; if (out.every(j => Math.abs(j - i) > 2)) out.push(i); }
+    return out.sort((p, q) => p - q);
+  };
+  for (const f of angulos) {
+    const cf = Math.cos(f), sf = Math.sin(f);
+    U.fill(0); V.fill(0); FU.fill(0); FV.fill(0);
+    for (let k = 0; k < px.length; k++) {               // gira los bordes: los lados de la carta quedan a u o v constante
+      const p = px[k], x = p % w, y = (p - x) / w;
+      let d = Math.abs(ang[p] - f); if (d > PI / 2) d = PI - d;
+      const esU = d <= TOL;
+      if (!esU && PI / 2 - d > TOL) continue;
+      const iu = Math.round((x - cx) * cf + (y - cy) * sf) + R, iv = Math.round((y - cy) * cf - (x - cx) * sf) + R, g = mag[p] < tope ? mag[p] : tope;
+      if (esU) { U[iu * N + iv] = 1; FU[iu] += g; } else { V[iv * N + iu] = 1; FV[iv] += g; }
+    }
+    for (let i = 1; i < N - 1; i++) {                    // largo aproximado de cada recta, sin contar el grosor del borde
+      let s = 0, t = 0; const r0 = (i - 1) * N, r1 = i * N, r2 = (i + 1) * N;
+      for (let j = 0; j < N; j++) { if (U[r0 + j] | U[r1 + j] | U[r2 + j]) s++; if (V[r0 + j] | V[r1 + j] | V[r2 + j]) t++; }
+      QU[i] = s; QV[i] = t;
+    }
+    const pu = lineas(FU, QU), pv = lineas(FV, QV);
+    if (pu.length < 2 || pv.length < 2) continue;
+    const SU = prefijos(U, pu), SV = prefijos(V, pv);
+    for (let i = 0; i < pu.length; i++) for (let j = i + 1; j < pu.length; j++) {
+      const W = pu[j] - pu[i]; if (W < ladoMin) continue;
+      for (let k = 0; k < pv.length; k++) for (let l = k + 1; l < pv.length; l++) {
+        const H = pv[l] - pv[k]; if (H < ladoMin) continue;
+        const corto = Math.min(W, H), largo = Math.max(W, H), rz = corto / largo;
+        if (rz < RMIN || rz > RMAX) continue;
+        const mv = Math.round(H * 0.08), mu = Math.round(W * 0.08);    // las esquinas redondeadas no cuentan
+        const a1 = pv[k] + mv, a2 = pv[l] - mv + 1, b1 = pu[i] + mu, b2 = pu[j] - mu + 1, la = a2 - a1, lb = b2 - b1;
+        const sL = (SU[i][a2] - SU[i][a1]) / la, sR = (SU[j][a2] - SU[j][a1]) / la, sT = (SV[k][b2] - SV[k][b1]) / lb, sB = (SV[l][b2] - SV[l][b1]) / lb;
+        const m = ((sL + sR) * la + (sT + sB) * lb) / (2 * (la + lb));
+        if (m < 0.6 || Math.min(sL, sR, sT, sB) < 0.35) continue;
+        cand.push({ f, u1: pu[i], u2: pu[j], v1: pv[k], v2: pv[l], m, corto, largo });
+      }
+    }
+  }
+  if (!cand.length) return null;
+  cand.sort((p, q) => q.m - p.m);
+
+  const area = c => (c.u2 - c.u1) * (c.v2 - c.v1);
+  const dentro = c => {                                  // píxeles cambiados que caen dentro del candidato
+    if (c.d !== undefined) return c.d;
+    const cf = Math.cos(c.f), sf = Math.sin(c.f); let s = 0;
+    for (let k = 0; k < cam.length; k += 2) {
+      const p = cam[k], x = p % w, y = (p - x) / w, u = (x - cx) * cf + (y - cy) * sf + R, v = (y - cy) * cf - (x - cx) * sf + R;
+      if (u >= c.u1 - 1 && u <= c.u2 + 1 && v >= c.v1 - 1 && v <= c.v2 + 1) s += 2;
+    }
+    return c.d = Math.min(s, cam.length);
+  };
+  const calce = c => { if (!cam) return 0; const d = dentro(c); return d / (cam.length + area(c) - d); };   // cuánto coincide con lo que cambió
+  const cubre = c => !cam || dentro(c) >= 0.6 * cam.length;   // la carta nueva tiene que cubrir lo que cambió
+  const contiene = (c, b) => c.f === b.f && c.u1 <= b.u1 + 2 && c.u2 >= b.u2 - 2 && c.v1 <= b.v1 + 2 && c.v2 >= b.v2 - 2;
+  const extension = new Map();                           // hasta dónde llega lo que cambió, en los ejes de cada ángulo
+  const desajuste = c => {
+    let e = extension.get(c.f);
+    if (!e) {
+      const hu = new Int32Array(N), hv = new Int32Array(N), cf = Math.cos(c.f), sf = Math.sin(c.f); let tot = 0;
+      for (let k = 0; k < cam.length; k += 2) {
+        const p = cam[k], x = p % w, y = (p - x) / w;
+        hu[Math.round((x - cx) * cf + (y - cy) * sf) + R]++; hv[Math.round((y - cy) * cf - (x - cx) * sf) + R]++; tot++;
+      }
+      const pc = (hh, q) => { let acc = 0; for (let i = 0; i < N; i++) { acc += hh[i]; if (acc >= q * tot) return i; } return N - 1; };
+      e = [pc(hu, 0.007), pc(hu, 0.993), pc(hv, 0.007), pc(hv, 0.993)]; extension.set(c.f, e);
+    }
+    return Math.max(Math.abs(e[0] - c.u1), Math.abs(e[1] - c.u2), Math.abs(e[2] - c.v1), Math.abs(e[3] - c.v2)) / c.corto;
+  };
+  // El contorno de la carta y no un marco interior: de los que contienen a b, el más grande que siga bien respaldado.
+  const contorno = (b, lista, piso) => { let e = b; for (const c of lista) if (c.m >= piso && contiene(c, b) && area(c) > area(e)) e = c; return e; };
+  let el = null, coincide = false, silueta = null, mayor = null, porMarco = false, marco = null;
+  // En una pila de cartas con el mismo color de borde, el contorno de la de arriba casi no se ve sobre la de abajo.
+  // Su marco interior sí se ve entero: si ya se conoce, dice dónde tiene que estar el contorno.
+  const pos = c => [c.u1, c.u2, c.v1, c.v2], SG = [-1, 1, -1, 1], orden = f => f <= PI / 4 ? [3, 1, 0, 2] : [0, 2, 1, 3];
+  const esq = c => { const cf = Math.cos(c.f), sf = Math.sin(c.f); return [[c.u1, c.v1], [c.u2, c.v1], [c.u2, c.v2], [c.u1, c.v2]].map(q => [cx + (q[0] - R) * cf - (q[1] - R) * sf, cy + (q[0] - R) * sf + (q[1] - R) * cf]); };
+  let F = null, segunMarco = null;                       // el marco hallado y las esquinas del contorno que le corresponde
+  if (o.previo && o.marco) {
+    const M = o.marco, desM = c => Math.max(Math.abs(c.corto - M.corto) / M.corto, Math.abs(c.largo - M.largo) / M.largo);
+    let mejor = -1e9;
+    for (const c of cand) { if (c.m < 0.85) break; const d = desM(c); if (d <= 0.025) { const v = c.m - 8 * d; if (v > mejor) { mejor = v; F = c; } } }
+    if (F) {
+      const ix = orden(F.f), po = pos(F).map((v, s) => v + SG[s] * M.ins[ix[s]]), O = { f: F.f, u1: po[0], u2: po[1], v1: po[2], v2: po[3] };
+      if (cubre(O)) segunMarco = esq(O); else F = null;
+    }
+  }
+  const calzaMarco = c => {                              // ¿las esquinas de c caen donde dice el marco?
+    const a = esq(c), tol = 0.035 * c.corto;
+    for (let i = 0; i < 4; i++) { let m = 1e9; for (let j = 0; j < 4; j++) m = Math.min(m, Math.hypot(a[i][0] - segunMarco[j][0], a[i][1] - segunMarco[j][1])); if (m > tol) return false; }
+    return true;
+  };
+  if (o.previo) {                                        // con el tamaño conocido: el mejor entre los de ese tamaño
+    const P = o.previo, des = c => Math.max(Math.abs(c.corto - P.corto) / P.corto, Math.abs(c.largo - P.largo) / P.largo);
+    const cons = cand.filter(c => des(c) <= 0.025).slice(0, 60).filter(cubre);
+    let mejor = -1e9;                                  // el tamaño manda: un marco interior o una carta que asoma miden distinto
+    for (const c of cons) { const v = c.m + 0.5 * calce(c) - 8 * des(c) + (segunMarco && calzaMarco(c) ? 0.15 : 0); if (v > mejor) { mejor = v; el = c; } }
+    if (el) {
+      coincide = true;
+      const g = contorno(el, cand, Math.max(0.8, el.m - 0.1));
+      if (g.corto > P.corto * 1.04 || g.largo > P.largo * 1.04) mayor = { corto: g.corto, largo: g.largo };
+    }
+  }
+  if (!el && F) { el = F; porMarco = true; coincide = true; }   // no hay contorno: la carta se ubica por su marco y se le suma el borde
+  if (!el && cam && o.vacia) {                           // sobre la caja vacía: el que mejor calza con la silueta de lo que cambió
+    const m0 = cand[0].m; let mejor = 1e9;
+    for (let t = 0; t < cand.length && t < 60 && cand[t].m >= m0 - 0.12; t++) { const v = desajuste(cand[t]); if (v < mejor) { mejor = v; el = cand[t]; } }
+    if (mejor > 0.08) el = null;
+  }
+  if (!el) {
+    let base = null;
+    for (let t = 0; t < cand.length && t < 12 && !base; t++) if (cubre(cand[t])) base = cand[t];
+    if (!base) return null;
+    el = contorno(base, cand, base.m - 0.15);
+  }
+  if (cam && o.vacia && !porMarco) silueta = desajuste(el);
+  if (!porMarco) {                                       // el marco de esta carta: el rectángulo interior más grande y bien marcado
+    const ix = orden(el.f), pe = pos(el); let F = null;
+    for (const c of cand) {
+      if (c.m < 0.85) break;
+      if (c.f !== el.f || (F && area(c) <= area(F))) continue;
+      const pc = pos(c); let ok = true;
+      for (let s = 0; s < 4 && ok; s++) { const d = SG[s] * (pe[s] - pc[s]); if (d < 0.02 * el.corto || d > 0.14 * el.corto) ok = false; }
+      if (ok) F = c;
+    }
+    if (F) { const pc = pos(F), ins = [0, 0, 0, 0]; for (let s = 0; s < 4; s++) ins[ix[s]] = SG[s] * (pe[s] - pc[s]); marco = { corto: F.corto, largo: F.largo, ins }; }
+  }
+
+  // Ajuste fino de cada lado: entre las rectas cercanas (algo corridas o giradas) se queda con la que junta más borde,
+  // y sus cruces dan las esquinas. Admite algo de perspectiva.
+  const cf = Math.cos(el.f), sf = Math.sin(el.f), W = el.u2 - el.u1, H = el.v2 - el.v1, TOL2 = 14 * PI / 180;
+  const lados = [[], [], [], []];
+  for (let k = 0; k < px.length; k++) {
+    const p = px[k], x = p % w, y = (p - x) / w;
+    let d = Math.abs(ang[p] - el.f); if (d > PI / 2) d = PI - d;
+    const u = (x - cx) * cf + (y - cy) * sf + R, v = (y - cy) * cf - (x - cx) * sf + R;
+    let s = -1, e = 0, t = 0;                            // e: distancia a la recta candidata · t: posición a lo largo del lado
+    if (d <= TOL2) { if (v > el.v1 + 0.06 * H && v < el.v2 - 0.06 * H) { s = u < (el.u1 + el.u2) / 2 ? 0 : 1; e = u - (s ? el.u2 : el.u1); t = v - (el.v1 + el.v2) / 2; } }
+    else if (PI / 2 - d <= TOL2 && u > el.u1 + 0.06 * W && u < el.u2 - 0.06 * W) { s = v < (el.v1 + el.v2) / 2 ? 2 : 3; e = v - (s === 3 ? el.v2 : el.v1); t = u - (el.u1 + el.u2) / 2; }
+    if (s < 0 || e < -4.5 || e > 4.5) continue;
+    lados[s].push(e, t, mag[p], x, y);
+  }
+  const rectas = lados.map((L, s) => {
+    const nx = s < 2 ? cf : -sf, ny = s < 2 ? sf : cf, base = [nx, ny, [el.u1, el.u2, el.v1, el.v2][s] - R + cx * nx + cy * ny];
+    // Sin salirse más de 3 px de la recta candidata en todo el lado: un marco interior, que está más lejos, no la arrastra.
+    const medio = (s < 2 ? H : W) / 2, techo = 3 * thr; let mejor = -1, e0 = 0, k0 = 0;
+    for (let ti = -5; ti <= 5; ti++) {                   // giro de hasta ±2,5° en pasos de 0,5°
+      const kt = Math.tan(ti * 0.5 * PI / 180), giro = Math.abs(kt) * medio;
+      for (let oi = -6; oi <= 6; oi++) {                 // corrimiento de hasta ±3 px en pasos de 0,5
+        const off = oi * 0.5; if (Math.abs(off) + giro > 3) continue;
+        let sum = 0;
+        for (let i = 0; i < L.length; i += 5) { const r = L[i] - off - kt * L[i + 1]; if (r >= -1 && r <= 1) sum += L[i + 2] < techo ? L[i + 2] : techo; }
+        if (sum > mejor + 1e-6 || (sum > mejor - 1e-6 && Math.abs(off) + giro < Math.abs(e0) + Math.abs(Math.tan(k0 * 0.5 * PI / 180)) * medio)) { mejor = sum; e0 = off; k0 = ti; }
+      }
+    }
+    const kt = Math.tan(k0 * 0.5 * PI / 180), q = new Float64Array(7);
+    for (let i = 0; i < L.length; i += 5) {
+      const r = L[i] - e0 - kt * L[i + 1]; if (r < -1.5 || r > 1.5) continue;
+      const g = L[i + 2], x = L[i + 3], y = L[i + 4];
+      q[0]++; q[1] += g; q[2] += g * x; q[3] += g * y; q[4] += g * x * x; q[5] += g * y * y; q[6] += g * x * y;
+    }
+    if (q[0] < 0.3 * (s < 2 ? H : W) || q[1] <= 0) return base;
+    const mx = q[2] / q[1], my = q[3] / q[1], sxx = q[4] / q[1] - mx * mx, syy = q[5] / q[1] - my * my, sxy = q[6] / q[1] - mx * my;
+    const t = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+    let fx = -Math.sin(t), fy = Math.cos(t);
+    if (fx * nx + fy * ny < 0) { fx = -fx; fy = -fy; }
+    if (fx * nx + fy * ny < 0.9986) return base;                          // la recta ajustada se desvió más de 3°: se descarta
+    return [fx, fy, fx * mx + fy * my];
+  });
+  if (porMarco) {                                        // del marco al contorno: cada lado se aleja lo que mide el borde
+    const ix = orden(el.f);
+    for (let s = 0; s < 4; s++) rectas[s] = [rectas[s][0], rectas[s][1], rectas[s][2] + SG[s] * o.marco.ins[ix[s]]];
+  }
+  const cruce = (p, q) => { const det = p[0] * q[1] - p[1] * q[0]; return [(p[2] * q[1] - q[2] * p[1]) / det, (p[0] * q[2] - q[0] * p[2]) / det]; };
+  const P4 = [cruce(rectas[0], rectas[2]), cruce(rectas[1], rectas[2]), cruce(rectas[1], rectas[3]), cruce(rectas[0], rectas[3])];
+  const quad = el.f <= PI / 4 ? P4 : [P4[3], P4[0], P4[1], P4[2]];        // empieza por la esquina superior izquierda tal como se ve
+  const dist = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
+  const arriba = dist(quad[0], quad[1]), abajo = dist(quad[3], quad[2]), izq = dist(quad[0], quad[3]), der = dist(quad[1], quad[2]);
+  if (Math.abs(arriba - abajo) > 0.08 * Math.max(arriba, abajo) || Math.abs(izq - der) > 0.08 * Math.max(izq, der)) return null;
+  const ancho = (arriba + abajo) / 2, alto = (izq + der) / 2, corto = Math.min(ancho, alto), largo = Math.max(ancho, alto);
+  if (corto / largo < RMIN - 0.02 || corto / largo > RMAX + 0.02) return null;
+  if (coincide && (Math.abs(corto - o.previo.corto) > 0.04 * o.previo.corto || Math.abs(largo - o.previo.largo) > 0.04 * o.previo.largo)) coincide = false;
+  for (let i = 0; i < 4; i++) {
+    const c = quad[i], a = quad[(i + 1) % 4], b = quad[(i + 3) % 4];
+    if (!(c[0] > -0.03 * w && c[0] < 1.03 * w && c[1] > -0.03 * h && c[1] < 1.03 * h)) return null;
+    const cos = ((a[0] - c[0]) * (b[0] - c[0]) + (a[1] - c[1]) * (b[1] - c[1])) / (dist(a, c) * dist(b, c));
+    if (Math.abs(cos) > 0.07) return null;                               // esquinas a 90° ± 4°
+  }
+  if (porMarco) marco = { corto: Math.min(el.u2 - el.u1, el.v2 - el.v1), largo: Math.max(el.u2 - el.u1, el.v2 - el.v1), ins: o.marco.ins };
+  return { quad, ancho, alto, apoyo: el.m, coincide, silueta, mayor, marco, porMarco };
+}
+
+// Decide si el rectángulo hallado es de fiar y mantiene lo aprendido. est: { tam, pend, veces, marco }
+// Se acepta si mide lo mismo que las cartas anteriores, si calza con la silueta sobre la caja vacía o,
+// cuando todavía no se conoce el tamaño, si dos fotos seguidas dan el mismo. Si no, esa foto se guarda completa.
+function aceptaCarta(est, r) {
+  if (!r) return false;
+  const t = { corto: Math.min(r.ancho, r.alto), largo: Math.max(r.ancho, r.alto) };
+  const cerca = (a, b) => Math.abs(a.corto - b.corto) <= 0.03 * b.corto && Math.abs(a.largo - b.largo) <= 0.03 * b.largo;
+  const mezcla = (a, b) => ({ corto: a.corto * 0.7 + b.corto * 0.3, largo: a.largo * 0.7 + b.largo * 0.3 });
+  const visto = s => { if (est.pend && cerca(s, est.pend)) est.veces++; else { est.pend = s; est.veces = 1; } return est.veces; };
+  if (r.coincide && est.tam) {
+    if (cerca(t, est.tam)) {
+      est.tam = mezcla(est.tam, t);                      // sigue de a poco los cambios de tamaño (la pila se acerca a la cámara)
+      const M = est.marco, m = r.marco;
+      if (m && !M) est.marco = m;
+      else if (m && cerca(m, M)) est.marco = Object.assign(mezcla(M, m), { ins: r.porMarco ? M.ins : M.ins.map((v, i) => v * 0.7 + m.ins[i] * 0.3) });
+    }
+    if (!r.mayor) est.pend = null;
+    else if (visto(r.mayor) >= 2) { est.tam = r.mayor; est.marco = null; est.pend = null; }    // el tamaño aprendido había quedado chico
+    return true;
+  }
+  if ((r.silueta !== null && r.silueta <= 0.025) || (!est.tam && visto(t) >= 2)) { est.tam = t; est.marco = r.marco || null; est.pend = null; return true; }
+  return false;
+}
+
+// Aleja cada lado d píxeles hacia afuera: un margen fino para no cortar el borde de la carta.
+function ensanchar(quad, d) {
+  return quad.map((c, i) => {
+    const a = quad[(i + 1) % 4], b = quad[(i + 3) % 4];
+    const ax = c[0] - a[0], ay = c[1] - a[1], la = Math.hypot(ax, ay) || 1, bx = c[0] - b[0], by = c[1] - b[1], lb = Math.hypot(bx, by) || 1;
+    return [c[0] + d * (ax / la + bx / lb), c[1] + d * (ay / la + by / lb)];
+  });
+}
+
+// Lleva el cuadrilátero quad (supIzq, supDer, infDer, infIzq) de la imagen src a un rectángulo de W × H píxeles.
+// Las coordenadas de quad son continuas: el píxel i ocupa de i a i + 1. Escribe en out las filas j0 a j1 − 1.
+function enderezar(src, sw, sh, quad, W, H, out, j0, j1) {
+  const x0 = quad[0][0], y0 = quad[0][1], x1 = quad[1][0], y1 = quad[1][1], x2 = quad[2][0], y2 = quad[2][1], x3 = quad[3][0], y3 = quad[3][1];
+  const dx1 = x1 - x2, dx2 = x3 - x2, sx = x0 - x1 + x2 - x3, dy1 = y1 - y2, dy2 = y3 - y2, sy = y0 - y1 + y2 - y3;
+  const den = dx1 * dy2 - dx2 * dy1, g = den ? (sx * dy2 - dx2 * sy) / den : 0, hh = den ? (dx1 * sy - sx * dy1) / den : 0;
+  const a = x1 - x0 + g * x1, b = x3 - x0 + hh * x3, c = x0, d = y1 - y0 + g * y1, e = y3 - y0 + hh * y3, f = y0;
+  const mx = sw - 1, my = sh - 1;
+  for (let j = j0; j < j1; j++) {
+    const v = (j + 0.5) / H;
+    for (let i = 0, o4 = j * W * 4; i < W; i++, o4 += 4) {
+      const u = (i + 0.5) / W, z = 1 / (g * u + hh * v + 1);
+      let X = (a * u + b * v + c) * z - 0.5, Y = (d * u + e * v + f) * z - 0.5;
+      X = X < 0 ? 0 : X > mx ? mx : X; Y = Y < 0 ? 0 : Y > my ? my : Y;
+      const xi = X | 0, yi = Y | 0, fx = X - xi, fy = Y - yi, xj = xi < mx ? xi + 1 : xi, yj = yi < my ? yi + 1 : yi;
+      const p00 = (yi * sw + xi) * 4, p10 = (yi * sw + xj) * 4, p01 = (yj * sw + xi) * 4, p11 = (yj * sw + xj) * 4;
+      const w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
+      out[o4] = src[p00] * w00 + src[p10] * w10 + src[p01] * w01 + src[p11] * w11;
+      out[o4 + 1] = src[p00 + 1] * w00 + src[p10 + 1] * w10 + src[p01 + 1] * w01 + src[p11 + 1] * w11;
+      out[o4 + 2] = src[p00 + 2] * w00 + src[p10 + 2] * w10 + src[p01 + 2] * w01 + src[p11 + 2] * w11;
+      out[o4 + 3] = 255;
+    }
+  }
+}
 /*</puro>*/
 
 /* ════════ Ajustes ════════ */
 const CLAVE = 'escaner-cartas.ajustes';
 const ROI_BASE = { x: 0.08, y: 0.08, w: 0.84, h: 0.84 };
-const BASE = { sens: 5, stableMs: 600, dedupe: true, sound: true, quality: 90, res: 'fhd', deviceId: '' };
+const BASE = { sens: 5, stableMs: 600, dedupe: true, sound: true, recorte: true, quality: 90, res: 'fhd', deviceId: '' };
 const RES = { foto: [4032, 3024], max: [3840, 2160], fhd: [1920, 1080], hd: [1280, 720] };
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
@@ -646,6 +1042,7 @@ function cargarAjustes() {
   if (Number.isFinite(o.stableMs)) c.stableMs = clamp(o.stableMs, 200, 2000);
   if (typeof o.dedupe === 'boolean') c.dedupe = o.dedupe;
   if (typeof o.sound === 'boolean') c.sound = o.sound;
+  if (typeof o.recorte === 'boolean') c.recorte = o.recorte;
   if (Number.isFinite(o.quality)) c.quality = clamp(o.quality, 60, 100);
   if (RES[o.res]) c.res = o.res;
   if (typeof o.deviceId === 'string') c.deviceId = o.deviceId;
@@ -733,6 +1130,13 @@ const lienzoAn = document.createElement('canvas'), ctxAn = lienzoAn.getContext('
 const lienzoMini = document.createElement('canvas'), ctxMini = lienzoMini.getContext('2d');
 let luma = null, celdasBuf = null;
 
+// Recorte: copia chica de cada foto donde se busca la carta, y lo aprendido del montaje actual.
+const DET = 400;
+const lienzoDet = document.createElement('canvas'), ctxDet = lienzoDet.getContext('2d', { willReadFrequently: true });
+const mitades = [document.createElement('canvas'), document.createElement('canvas')];
+const tamCarta = { tam: null, pend: null, veces: 0, marco: null };      // tamaño y marco de carta ya vistos (los mantiene aceptaCarta)
+let caja = null, previa = null, cajaDesde = 0, ultimoRecorte = '';
+
 const nf1 = new Intl.NumberFormat('es', { maximumFractionDigits: 1 });
 const nf1fijo = new Intl.NumberFormat('es', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const peso = b => b >= 1048576 ? nf1.format(b / 1048576) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
@@ -810,7 +1214,7 @@ async function conectar(s, d) {
   intro.hidden = true; view.hidden = false;
   $('btnManual').disabled = false; $('btnSalirDemo').hidden = !d;
   setModo('pausa'); setEstado('pausa');
-  encuadrar(); pintarRoi(); detector.reset();
+  encuadrar(); pintarRoi(); detector.reset(); olvidarRecorte();
   if (pista) pista.addEventListener('ended', alCortarse);
   refrescarCamara();
 }
@@ -844,7 +1248,8 @@ function pintarResInfo() {
   const r = roiPx(), pedido = RES[cfg.res];
   let t = 'La cámara entrega ' + vw + ' × ' + vh + ' px (' + nf1.format(vw * vh / 1e6) + ' MP).';
   if (vw * vh < pedido[0] * pedido[1] * 0.6) t += ' Es lo máximo que esta cámara le da a una página web.';
-  p.textContent = t + ' Con el marco actual, cada foto queda de ' + r.w + ' × ' + r.h + ' px. Para más detalle, acerca el equipo hasta que la carta llene el marco.';
+  p.textContent = t + (cfg.recorte ? ' El marco actual mide ' + r.w + ' × ' + r.h + ' px; la foto recortada lleva solo los píxeles que ocupa la carta.'
+    : ' Con el marco actual, cada foto queda de ' + r.w + ' × ' + r.h + ' px.') + ' Para más detalle, acerca el equipo hasta que la carta llene el marco.';
 }
 
 async function refrescarCamara() {
@@ -886,7 +1291,7 @@ function encuadrar() {
   view.style.width = Math.floor(w) + 'px'; view.style.height = Math.floor(h) + 'px';
 }
 if (window.ResizeObserver) new ResizeObserver(encuadrar).observe(stage); else window.addEventListener('resize', encuadrar);
-video.addEventListener('resize', () => { encuadrar(); detector.reset(); refrescarCamara(); });
+video.addEventListener('resize', () => { encuadrar(); detector.reset(); olvidarRecorte(); refrescarCamara(); });
 video.addEventListener('pause', () => { if (stream && !document.hidden) video.play().catch(() => {}); });
 
 function pintarRoi() {
@@ -920,7 +1325,7 @@ roiEl.addEventListener('pointermove', e => {
   }
   cfg.roi = { x, y, w, h }; pintarRoi();
 });
-const soltar = () => { if (!arrastre) return; arrastre = null; guardarAjustes(); detector.reset(); pintarResInfo(); };
+const soltar = () => { if (!arrastre) return; arrastre = null; guardarAjustes(); detector.reset(); olvidarRecorte(); pintarResInfo(); };
 roiEl.addEventListener('pointerup', soltar); roiEl.addEventListener('pointercancel', soltar);
 
 /* ════════ Análisis de cada cuadro ════════ */
@@ -949,6 +1354,9 @@ function tick() {
   try { c = leerCuadro(); } catch (e) { return; }
   const r = detector.update(c.cells, c.nit, now);
   if (r.capture) capturar('auto');
+  else if (cfg.recorte && !caja && r.state === 'quieto' && now >= cajaDesde && !cola.length && r.motion < umbrales(cfg.sens).motionLo) {
+    try { tomarCaja(); } catch (e) { cajaDesde = now + 3000; }
+  }
   if (r.state === 'captura' || r.state === 'sin-cambio') { retenido = r.state; retenidoHasta = now + 900; }
   else if (r.state !== 'quieto') retenidoHasta = 0;
   setEstado(now < retenidoHasta ? retenido : r.state);
@@ -957,7 +1365,8 @@ function tick() {
   if (!hojaAjustes.hidden) {
     const u = umbrales(cfg.sens);
     $('diag').textContent = 'Movimiento ' + nf1fijo.format(r.motion * 100) + ' % (dispara con ' + nf1fijo.format(u.motionHi * 100) +
-      ' %) · Último cambio ' + (ultimoCambio === null ? 'sin datos' : nf1fijo.format(ultimoCambio * 100) + ' %') + ' (guarda con ' + nf1fijo.format(u.minChange * 100) + ' %)';
+      ' %) · Último cambio ' + (ultimoCambio === null ? 'sin datos' : nf1fijo.format(ultimoCambio * 100) + ' %') + ' (guarda con ' + nf1fijo.format(u.minChange * 100) + ' %)' +
+      (cfg.recorte && ultimoRecorte ? ' · Último recorte: ' + ultimoRecorte : '');
   }
   // Con imágenes muy grandes analizar cada cuadro cuesta más: se espacia para no trabar la vista previa.
   const costo = performance.now() - now;
@@ -987,18 +1396,90 @@ function pitido() {
   } catch (e) {}
 }
 
+// La zona de la carta, tal como la ve la cámara en este instante, en un lienzo propio.
+function fotograma() {
+  const r = roiPx(), c = document.createElement('canvas');
+  c.width = r.w; c.height = r.h;
+  c.getContext('2d').drawImage(video, -r.x, -r.y, video.videoWidth, video.videoHeight);
+  return c;
+}
+
+/* ════════ Recorte de la carta ════════ */
+function olvidarRecorte() { caja = null; previa = null; tamCarta.tam = tamCarta.pend = tamCarta.marco = null; tamCarta.veces = 0; ultimoRecorte = ''; cajaDesde = performance.now() + 800; }
+
+// Copia chica del lienzo. Se reduce de a mitades para promediar bien los píxeles: así los bordes no salen dentados.
+function aDet(c) {
+  const k = Math.min(1, DET / Math.max(c.width, c.height)), dw = Math.max(16, Math.round(c.width * k)), dh = Math.max(16, Math.round(c.height * k));
+  let src = c, sw = c.width, sh = c.height, i = 0;
+  while (sw >= dw * 2 && sh >= dh * 2) {
+    const t = mitades[i++ % 2], tw = Math.ceil(sw / 2), th = Math.ceil(sh / 2);
+    t.width = tw; t.height = th;
+    t.getContext('2d').drawImage(src, 0, 0, sw, sh, 0, 0, tw, th);
+    src = t; sw = tw; sh = th;
+  }
+  lienzoDet.width = dw; lienzoDet.height = dh;
+  ctxDet.drawImage(src, 0, 0, sw, sh, 0, 0, dw, dh);
+  const rgba = ctxDet.getImageData(0, 0, dw, dh).data;
+  mitades[0].width = mitades[0].height = mitades[1].width = mitades[1].height = 0;
+  return { rgba, w: dw, h: dh };
+}
+
+// Guarda cómo se ve la caja al empezar: lo que ya estaba ahí no se confunde después con una carta.
+function tomarCaja() {
+  const c = fotograma(), d = aDet(c);
+  c.width = c.height = 0;
+  const gris = grisDe(d.rgba, d.w * d.h);
+  caja = { w: d.w, h: d.h, gris };
+  previa = { gris, vacia: true };
+}
+
+const cede = () => new Promise(res => setTimeout(res, 0));
+
+// Devuelve un lienzo solo con la carta, derecha, o null si no la distingue con seguridad.
+async function recortar(c) {
+  const d = aDet(c), n = d.w * d.h;
+  if (caja && (caja.w !== d.w || caja.h !== d.h)) olvidarRecorte();
+  const gris = grisDe(d.rgba, n);
+  if (caja && listaCambio(gris, caja.gris, 10).length < 0.015 * n) {     // la caja volvió a quedar como al empezar (se sacó la pila)
+    previa = { gris, vacia: true }; ultimoRecorte = 'caja vacía'; return null;
+  }
+  const b = bordes(d.rgba, d.w, d.h), ant = previa && previa.gris.length === n ? previa : null;
+  const r = buscarCarta({
+    w: d.w, h: d.h, mag: b.mag, ang: b.ang,
+    cambio: ant ? listaCambio(gris, ant.gris, 10) : null, vacia: !!(ant && ant.vacia), previo: tamCarta.tam, marco: tamCarta.marco
+  });
+  previa = { gris, vacia: false };
+  if (!aceptaCarta(tamCarta, r)) { ultimoRecorte = r ? 'dudoso, se guardó completa' : 'no se distinguió la carta'; return null; }
+  const ex = c.width / d.w, ey = c.height / d.h;
+  const q = ensanchar(r.quad, 0.01 * Math.min(r.ancho, r.alto) + 1).map(p => [(p[0] + 0.5) * ex, (p[1] + 0.5) * ey]);
+  const lado = (i, j) => Math.hypot(q[i][0] - q[j][0], q[i][1] - q[j][1]);
+  const W = Math.max(8, Math.round((lado(0, 1) + lado(3, 2)) / 2)), H = Math.max(8, Math.round((lado(0, 3) + lado(1, 2)) / 2));
+  const xs = q.map(p => p[0]), ys = q.map(p => p[1]);
+  const x0 = clamp(Math.floor(Math.min(...xs)) - 1, 0, c.width - 2), y0 = clamp(Math.floor(Math.min(...ys)) - 1, 0, c.height - 2);
+  const x1 = clamp(Math.ceil(Math.max(...xs)) + 1, x0 + 2, c.width), y1 = clamp(Math.ceil(Math.max(...ys)) + 1, y0 + 2, c.height);
+  const src = c.getContext('2d').getImageData(x0, y0, x1 - x0, y1 - y0);
+  const sal = document.createElement('canvas'); sal.width = W; sal.height = H;
+  const ctx = sal.getContext('2d'), img = ctx.createImageData(W, H), q2 = q.map(p => [p[0] - x0, p[1] - y0]);
+  let t = performance.now();
+  for (let j = 0; j < H; j += 64) {
+    enderezar(src.data, src.width, src.height, q2, W, H, img.data, j, Math.min(H, j + 64));
+    if (performance.now() - t > 24) { await cede(); t = performance.now(); }   // deja respirar a la vista previa
+  }
+  ctx.putImageData(img, 0, 0);
+  ultimoRecorte = 'carta de ' + W + ' × ' + H + ' px' + (r.porMarco ? ' (ubicada por su marco)' : '');
+  return sal;
+}
+
 // La foto se toma al instante en un lienzo propio y se codifica después, en fila:
 // así no se pierde una carta si la anterior todavía se está guardando.
 function capturar(tipo) {
   if (!stream || !video.videoWidth) return;
-  const vw = video.videoWidth, vh = video.videoHeight, r = roiPx();
+  const r = roiPx();
   const enEspera = cola.reduce((s, it) => s + it.c.width * it.c.height * 4, 0);
   if (cola.length >= MAX_COLA || (cola.length && enEspera + r.w * r.h * 4 > MAX_COLA_BYTES)) {
     aviso('El equipo no alcanza a guardar tan rápido. Espera un momento antes de la próxima carta.'); return;
   }
-  const c = document.createElement('canvas');
-  c.width = r.w; c.height = r.h;
-  c.getContext('2d').drawImage(video, -r.x, -r.y, vw, vh);
+  const c = fotograma();
   destello(); pitido();
   cola.push({ c, ts: Date.now(), auto: tipo === 'auto' });
   pintarCuenta();
@@ -1009,8 +1490,15 @@ async function procesarCola() {
   if (ocupado) return;
   ocupado = true;
   while (cola.length) {
-    const it = cola[0], c = it.c;
+    const it = cola[0];
+    let c = it.c, rec;                // rec: true si quedó recortada, false si no se pudo, sin valor si el recorte está apagado
     try {
+      if (cfg.recorte) {
+        let r = null;
+        try { r = await recortar(c); } catch (e) { ultimoRecorte = 'falló, se guardó completa'; }
+        rec = !!r;
+        if (r) { c.width = c.height = 0; c = it.c = r; }
+      }
       const k = Math.min(1, MINI / Math.max(c.width, c.height));
       lienzoMini.width = Math.max(1, Math.round(c.width * k)); lienzoMini.height = Math.max(1, Math.round(c.height * k));
       ctxMini.drawImage(c, 0, 0, lienzoMini.width, lienzoMini.height);
@@ -1019,6 +1507,7 @@ async function procesarCola() {
       const buf = await (blob.arrayBuffer ? blob.arrayBuffer() : new Response(blob).arrayBuffer());
       await almacenListo;            // la numeración sigue a las fotos ya guardadas
       const meta = { id: sigId++, ts: it.ts, w: c.width, h: c.height, size: blob.size, crc: crc32(new Uint8Array(buf)), thumb, auto: it.auto };
+      if (rec !== undefined) meta.rec = rec;
       if (!(await almacen.add(meta, buf, blob))) {
         if (!volatil) aviso('El navegador no dejó guardar esta foto en el equipo; quedó solo en memoria. Exporta las fotos antes de cerrar la página.');
         volatil = true;
@@ -1040,6 +1529,7 @@ async function despierto() {
 function iniciar() {
   if (!stream) return;
   escaneando = true; detector.reset(); retenidoHasta = 0; ultimoCambio = null;
+  caja = null; cajaDesde = performance.now() + 800;      // la caja se vuelve a mirar en cada inicio
   setModo('escaneando'); setEstado('quieto'); pintarUmbral();
   if (!reloj) reloj = setInterval(tick, TICK_MS);
   despierto();
@@ -1052,7 +1542,7 @@ function pausar() {
 }
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
-  detector.reset();
+  detector.reset(); caja = null; cajaDesde = performance.now() + 800;
   if (!stream) return;
   if (escaneando) despierto();
   if (!demo && (!pista || pista.readyState === 'ended')) reabrir(); else video.play().catch(() => {});
@@ -1063,14 +1553,17 @@ function pintarMini(f) {
   const b = document.createElement('button'), i = new Image(), s = document.createElement('span');
   b.type = 'button'; b.className = 'mini'; b.dataset.id = f.id; b.setAttribute('aria-label', 'Foto ' + f.id);
   i.alt = ''; i.src = f.thumb; s.textContent = f.id;
-  b.append(i, s); b.addEventListener('click', () => abrirVisor(f.id));
+  b.append(i, s);
+  if (f.rec === false) { const e = document.createElement('em'); e.textContent = 'sin recorte'; b.append(e); b.setAttribute('aria-label', 'Foto ' + f.id + ', sin recorte'); }
+  b.addEventListener('click', () => abrirVisor(f.id));
   rejilla.prepend(b);
 }
 function pintarCuenta() {
   const n = fotos.length, total = fotos.reduce((s, f) => s + f.size, 0), ultima = fotos[n - 1];
   const conCola = n + cola.length;   // el contador de arriba sube apenas se toma la foto
   $('cuentaNum').textContent = conCola; $('cuentaTxt').textContent = conCola === 1 ? 'foto' : 'fotos';
-  $('fotosResumen').textContent = n ? n + ' · ' + peso(total) : '';
+  const enteras = fotos.reduce((k, f) => k + (f.rec === false ? 1 : 0), 0);
+  $('fotosResumen').textContent = n ? n + ' · ' + peso(total) + (enteras ? ' · ' + enteras + ' sin recorte' : '') : '';
   $('fotosVacio').hidden = n > 0; $('fotosAcciones').hidden = n === 0; $('notaVolatil').hidden = !(n && volatil);
   icoFotos.style.backgroundImage = ultima ? 'url("' + ultima.thumb + '")' : '';
   icoFotos.classList.toggle('con-foto', !!ultima);
@@ -1083,7 +1576,7 @@ async function abrirVisor(id) {
   if (i < 0) return cerrarVisor();
   const f = fotos[i];
   visorId = id; visor.hidden = false; desarmar($('btnVisorBorrar'));
-  $('visorInfo').textContent = 'Foto ' + f.id + ' · ' + f.w + ' × ' + f.h + ' px · ' + peso(f.size);
+  $('visorInfo').textContent = 'Foto ' + f.id + ' · ' + f.w + ' × ' + f.h + ' px · ' + peso(f.size) + (f.rec === false ? ' · sin recorte' : '');
   $('visorPos').textContent = (i + 1) + ' de ' + fotos.length;
   $('btnVisorPrev').disabled = i === 0; $('btnVisorNext').disabled = i === fotos.length - 1;
   visorImg.src = f.thumb;
@@ -1235,11 +1728,13 @@ function cerrarExportar() {
 function crearDemo() {
   const c = document.createElement('canvas'); c.width = 720; c.height = 960;
   const g = c.getContext('2d'), pila = [];
-  let anim = null, n = 0, eventos = 0, proximo = performance.now() + 1400;
+  let anim = null, n = 0, eventos = 0, proximo = performance.now() + 2800;   // deja ver un momento la caja vacía
   const rr = (x, y, w, h, r) => { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); };
   function carta(k, y, rot) {
     g.save(); g.translate(k.x, y); g.rotate(rot);
+    g.shadowColor = 'rgba(0,0,0,.35)'; g.shadowBlur = 10; g.shadowOffsetY = 3;
     rr(-190, -266, 380, 532, 22); g.fillStyle = '#f4f1e8'; g.fill();
+    g.shadowColor = 'transparent';
     const grad = g.createLinearGradient(0, -240, 0, 240);
     grad.addColorStop(0, 'hsl(' + k.tono + ',58%,46%)'); grad.addColorStop(1, 'hsl(' + ((k.tono + 45) % 360) + ',62%,26%)');
     rr(-170, -246, 340, 492, 12); g.fillStyle = grad; g.fill();
@@ -1259,11 +1754,11 @@ function crearDemo() {
     const now = performance.now();
     g.fillStyle = '#24312c'; g.fillRect(0, 0, 720, 960);
     g.strokeStyle = '#141c19'; g.lineWidth = 40; g.strokeRect(20, 20, 680, 920);
-    for (const k of pila.slice(-3)) carta(k, k.y, k.rot);
+    for (const k of pila.slice(-14)) carta(k, k.y, k.rot);
     if (!anim && now >= proximo) {
       eventos++;
       anim = eventos % 4 === 0 ? { mano: true, t: now }
-        : { t: now, k: { n: ++n, tono: (n * 67) % 360, x: 360 + (Math.random() - 0.5) * 44, y: 480 + (Math.random() - 0.5) * 44, rot: (Math.random() - 0.5) * 0.14 } };
+        : { t: now, k: { n: ++n, tono: (n * 67) % 360, x: 360 + (Math.random() - 0.5) * 70, y: 480 + (Math.random() - 0.5) * 70, rot: (Math.random() - 0.5) * 0.4 } };
     }
     if (anim) {
       const p = Math.min(1, (now - anim.t) / (anim.mano ? 750 : 430));
@@ -1327,7 +1822,7 @@ $('btnCerrarAjustes').addEventListener('click', () => { hojaAjustes.hidden = tru
 function pintarAjustes() {
   $('inSens').value = cfg.sens; $('outSens').textContent = cfg.sens + ' de 10';
   $('inEspera').value = cfg.stableMs; $('outEspera').textContent = nf1fijo.format(cfg.stableMs / 1000) + ' s';
-  $('inDedupe').checked = cfg.dedupe; $('inSonido').checked = cfg.sound;
+  $('inDedupe').checked = cfg.dedupe; $('inSonido').checked = cfg.sound; $('inRecorte').checked = cfg.recorte;
   $('inCalidad').value = cfg.quality; $('outCalidad').textContent = cfg.quality + ' %';
   $('selRes').value = cfg.res;
   pintarUmbral();
@@ -1336,12 +1831,13 @@ $('inSens').addEventListener('input', e => { cfg.sens = +e.target.value; guardar
 $('inEspera').addEventListener('input', e => { cfg.stableMs = +e.target.value; guardarAjustes(); pintarAjustes(); });
 $('inDedupe').addEventListener('change', e => { cfg.dedupe = e.target.checked; guardarAjustes(); });
 $('inSonido').addEventListener('change', e => { cfg.sound = e.target.checked; guardarAjustes(); if (cfg.sound) { activarAudio(); pitido(); } });
+$('inRecorte').addEventListener('change', e => { cfg.recorte = e.target.checked; guardarAjustes(); olvidarRecorte(); pintarResInfo(); });
 $('inCalidad').addEventListener('input', e => { cfg.quality = +e.target.value; guardarAjustes(); pintarAjustes(); });
 $('selRes').addEventListener('change', e => { cfg.res = e.target.value; guardarAjustes(); if (stream && !demo) reabrir(); });
 $('selCam').addEventListener('change', e => { cfg.deviceId = e.target.value; guardarAjustes(); if (stream && !demo) reabrir(); });
-$('inZoom').addEventListener('input', e => { $('outZoom').textContent = nf1.format(+e.target.value) + '×'; restringir({ zoom: +e.target.value }); detector.reset(); });
+$('inZoom').addEventListener('input', e => { $('outZoom').textContent = nf1.format(+e.target.value) + '×'; restringir({ zoom: +e.target.value }); detector.reset(); olvidarRecorte(); });
 $('inLuz').addEventListener('change', e => { restringir({ torch: e.target.checked }); detector.reset(); });
-$('btnRoiReset').addEventListener('click', () => { cfg.roi = Object.assign({}, ROI_BASE); guardarAjustes(); pintarRoi(); detector.reset(); pintarResInfo(); hojaAjustes.hidden = true; });
+$('btnRoiReset').addEventListener('click', () => { cfg.roi = Object.assign({}, ROI_BASE); guardarAjustes(); pintarRoi(); detector.reset(); olvidarRecorte(); pintarResInfo(); hojaAjustes.hidden = true; });
 
 document.addEventListener('gesturestart', e => e.preventDefault());   // sin zoom de pellizco accidental en iOS
 
